@@ -31,6 +31,14 @@ pub(crate) fn log_error(msg: &str) {
     eprintln!("{msg}");
 }
 
+/// 常规信息（选中了哪个 adapter 之类）：桌面走 stdout，wasm 走 console。
+pub(crate) fn log_info(msg: &str) {
+    #[cfg(all(target_arch = "wasm32", feature = "web"))]
+    web_sys::console::log_1(&msg.into());
+    #[cfg(not(all(target_arch = "wasm32", feature = "web")))]
+    println!("{msg}");
+}
+
 /// 平台差异：窗口属性微调（wasm 复用页面 canvas；其他端原样）。
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn window_attrs(
@@ -107,6 +115,11 @@ pub(crate) async fn init_renderer<A: App + 'static>(
     };
     match sisf_render::Renderer::new(instance, surface).await {
         Ok(mut renderer) => {
+            let info = renderer.device.adapter_info();
+            log_info(&format!(
+                "[sisf-app] adapter: {} ({:?}, {:?})",
+                info.name, info.device_type, info.backend
+            ));
             let (w, h) = {
                 let s = state.borrow();
                 s.frame.physical_size
@@ -119,6 +132,27 @@ pub(crate) async fn init_renderer<A: App + 'static>(
             state.borrow_mut().init_error = Some(e.to_string());
         }
     }
+}
+
+/// 平台差异：单调时钟（秒，进程起点附近无意义，只做差值）。
+///
+/// 循环计时必须走这里而不是 `std::time::Instant`：wasm32-unknown-unknown 的 std
+/// 没有时钟，`Instant::now()` 会直接 panic（`sys/time/unsupported.rs`），
+/// 浏览器侧改用 `performance.now()`。
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn now_secs() -> f64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static ZERO: OnceLock<Instant> = OnceLock::new();
+    ZERO.get_or_init(Instant::now).elapsed().as_secs_f64()
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn now_secs() -> f64 {
+    web_sys::window()
+        .and_then(|w| w.performance())
+        .map(|p| p.now() / 1000.0)
+        .unwrap_or_default()
 }
 
 /// 平台差异：页面是否被隐藏（wasm visibilitychange；其他端恒为 false）。

@@ -44,3 +44,7 @@ simd-jpeg = ["dep:sisf-media", "sisf-media/simd-jpeg"]
 [[example]]
 name = "hello_window"
 path = "../../examples/hello_window.rs"
+
+[[example]]
+name = "sprite_bench"
+path = "../../examples/sprite_bench.rs"

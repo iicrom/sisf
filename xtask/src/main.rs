@@ -4,7 +4,7 @@
 //! - `check-all`  三端 feature 组合 `cargo check`（win `--all-features` / wasm32 `web` / android `native`）
 //! - `fmt`        `cargo fmt --all`（附加 `--check` 透传）
 //! - `clippy`     workspace clippy（win + wasm，`-D warnings`）
-//! - `web`        构建 `hello_window` wasm 示例 + wasm-bindgen + 本地静态服务
+//! - `web`        构建 wasm 示例（`cargo xtask web [示例名]`，缺省 `hello_window`）+ wasm-bindgen + 本地静态服务
 //! - `golden`     离屏 golden 测试（T5 实装）
 //! - `wasm-test`  wasm-pack 浏览器测试（T12 实装）
 //! - `android`    cargo-ndk 构建 + adb 安装（T12 实装）
@@ -31,7 +31,7 @@ fn main() {
             rest_args(rest),
         ),
         "clippy" => clippy(),
-        "web" => web(),
+        "web" => web(rest.first().map(String::as_str).unwrap_or("hello_window")),
         "golden" => not_implemented("golden", "T5"),
         "wasm-test" => not_implemented("wasm-test", "T12"),
         "android" => not_implemented("android", "T12"),
@@ -157,13 +157,13 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn web() -> i32 {
+fn web(example: &str) -> i32 {
     let code = check(&[
         "build",
         "-p",
         "sisf",
         "--example",
-        "hello_window",
+        example,
         "--target",
         WASM_TARGET,
         "--no-default-features",
@@ -179,7 +179,7 @@ fn web() -> i32 {
         .join(WASM_TARGET)
         .join("debug")
         .join("examples")
-        .join("hello_window.wasm");
+        .join(format!("{example}.wasm"));
     if !wasm.exists() {
         eprintln!("找不到产物 {}", wasm.display());
         return 4;
@@ -217,6 +217,9 @@ fn serve_dir(dir: &Path) -> i32 {
     };
     println!("服务已启动: http://{addr}/index.html");
     println!("Ctrl+C 退出。WebGL2 回退访问 http://{addr}/index.html?wgl");
+    println!(
+        "换示例：cargo xtask web <示例名>，然后访问 http://{addr}/?ex=<示例名>（见 web/main.js）"
+    );
     for stream in listener.incoming() {
         match stream {
             Ok(s) => handle_http(s, dir),

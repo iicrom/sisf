@@ -9,7 +9,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use sisf_event::{EngineEvent, Lifecycle};
 use winit::application::ApplicationHandler;
@@ -31,7 +31,10 @@ pub(crate) struct RunState<A: App> {
     pub window: Option<Window>,
     pub frame: FrameCtx,
     pub events: Vec<EngineEvent>,
-    pub last: Option<Instant>,
+    /// 上一帧的 `platform::now_secs()`；`None` = 挂起后刚恢复，不吃时间。
+    pub last: Option<f64>,
+    /// 累计运行时间（秒，不含挂起期间）→ `FrameU::time`。
+    pub time: f32,
     pub(crate) winit_suspended: bool,
     pub(crate) occluded: bool,
     pub(crate) reported_suspended: bool,
@@ -56,6 +59,7 @@ impl<A: App> Runner<A> {
                 frame,
                 events: Vec::new(),
                 last: None,
+                time: 0.0,
                 winit_suspended: false,
                 occluded: false,
                 // 启动即视为"尚未上报过 Resumed"，首次 sync_suspend 会补发 Resumed。
@@ -147,12 +151,20 @@ impl<A: App + 'static> Runner<A> {
         if let Some((w, h)) = s.pending_configure.take() {
             renderer.configure(w, h);
         }
-        let dt = s.last.take().map(|t| t.elapsed()).unwrap_or(Duration::ZERO);
-        s.last = Some(Instant::now());
+        let now = platform::now_secs();
+        let dt = s
+            .last
+            .map(|prev| Duration::from_secs_f64((now - prev).max(0.0)))
+            .unwrap_or(Duration::ZERO);
+        s.last = Some(now);
+        s.time += dt.as_secs_f32();
         s.app.tick(dt, &mut s.frame);
-        s.app.draw(1.0, &mut renderer);
+        let frame_u = s.frame.frame_u(s.time);
         let clear = s.config.clear;
-        renderer.render_clear(clear);
+        renderer.begin_frame(&frame_u, clear);
+        s.app.draw(1.0, &mut renderer);
+        // 空实例集合也走完 pass，等价于 T2 的纯清屏。
+        renderer.end_frame();
         s.renderer = Some(renderer);
         // 链式续帧：本帧已提交，请求下一次 RedrawRequested。
         if let Some(window) = s.window.as_ref() {

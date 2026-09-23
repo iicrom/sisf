@@ -1,4 +1,4 @@
-//! GPU 清屏读回：证明 `render_clear` 的颜色换算与呈现通路正确（无需窗口）。
+//! GPU 清屏读回：证明 `Renderer::readback_clear` 的颜色换算与呈现通路正确（无需窗口）。
 //! wasm 无 headless adapter，故仅 native 运行。
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -35,14 +35,24 @@
 5. `wasm-bindgen` 不允许 `main` 同时被 bin 与 `#[wasm_bindgen(start)]` 导出：示例改为 `sisf_start()` + `real_main()`。
 
 ## T3 批量 quad 渲染器
-- [ ] `sisf-render/src/vertex.rs`：`#[repr(C)] Instance{ pos:Vec2, size:Vec2, uv0:Vec2, uv1:Vec2, color:[f32;4], rot:f32, tone:[f32;4], _pad:[f32;2] }`（64B）+ 单位 quad 顶点/索引缓冲。验收：`const _: () = assert!(size_of::<Instance>()==64)` + 字段偏移单测。
-- [ ] `shaders/sprite.wgsl`：group0 `FrameU{ proj: [[f32;4];8], time }`（viewport 栈）；group1 `tex` + `sampler`；VS 做 anchor/rotation/scale，flip 用 uv0/uv1 交换实现；FS 做预乘 alpha + tone offset/gray。验收：三端编译无 naga 报错。
-- [ ] `renderer.rs`：`Renderer::{new, begin_frame, end_frame}`；两条 pipeline（alpha-over、additive）+ `debug_lines` feature 下 clone 一条 `polygon_mode: Line`。验收：同一 `RenderPass` 内切换 pipeline 正常。
-- [ ] 实例缓冲：单 `Buffer`（`MAP_WRITE|VERTEX`）环形子分配，容量 16384 quad，写满先 flush 再续，容量可配。验收：wrap-around 与强制 flush 单测。
-- [ ] batch 分组：排序键 `(layer:u8, texture_epoch:u64, blend:u8, z:i32, insertion:u32)`，相邻同键合并为一次 `set_bind_group`+`draw`。验收：`batcher.rs` 单测断言 batch 数与提交顺序。
-- [ ] `FrameCtx::push_viewport/pop_viewport`（深度 8，越界 `debug_assert`）。验收：8 层嵌套单测。
-- [ ] `examples/sprite_bench.rs`：10 万 sprite 随机变换 + 帧时间打印。验收：桌面 ≥60fps（实测值记入 `docs/bench.md`），wasm `?wgl` 可跑。
-- 验收（整段）：单测 + bench 手测 → 提交 `P2 batched quad renderer`。
+- [x] `sisf-render/src/vertex.rs`：`#[repr(C)] Instance{ pos, size, uv0, uv1, color, rot, tone, layer, _pad }` + 单位 quad 顶点/索引缓冲。验收：`const _: () = assert!(size_of::<Instance>()==80)` + 字段偏移单测。→ `vertex::tests::{instance_field_offsets_match_stride, quad_is_unit_square_ccw}` 绿（64B 装不下，见下方事实 1）。
+- [x] `shaders/sprite.wgsl`：group0 `FrameU{ proj: 8×mat4x4, time }`（viewport 栈）；group1 `tex` + `sampler`；VS 做 anchor/rotation/scale，flip 用 `size` 符号实现（等价于交换 uv0/uv1）；FS 做预乘 alpha + tone offset/gray。验收：三端编译无 naga 报错 → 桌面 Vulkan 与 wasm32/WebGL2（ANGLE）同一份 shader 出图，`renderer::gpu_tests` 读回像素断言。
+- [x] `renderer.rs`：`Renderer::{new, begin_frame, end_frame}`；两条 pipeline（alpha-over、additive）+ `debug_lines` feature 下 clone 一条 `polygon_mode: Line`。验收：同一 `RenderPass` 内切换 pipeline 正常 → `renderer::gpu_tests::one_pass_switches_pipelines_bind_groups_and_slots`（离屏 64×64，2 条管线 + 2 个 bind group + 跨槽顶点缓冲，读回 6 个探针像素 + 清屏色 2 处）。
+- [x] 实例缓冲：环形子分配（`COPY_DST|VERTEX`，3 片在飞），默认 16384 quad/槽，写满先 flush 再续，容量可配（`Renderer::set_quads_per_slot`）。验收：wrap-around 与强制 flush 单测 → `ring::tests::{overflow_wraps_into_next_buffer_and_counts_flush, never_reuses_the_buffer_still_in_flight, capacity_grows_geometrically_to_fit_one_frame, begin_frame_reports_growth, empty_frame_uses_no_slot}`。
+- [x] batch 分组：排序键 `(layer:u8, texture_epoch:u64, blend:u8, z:i32, insertion:u32)`，相邻同键合并为一次 `set_bind_group`+`draw`。验收：`batch.rs` 单测断言 batch 数与提交顺序 → 7 项（含 `different_key_breaks_batch_and_keeps_order`、`split_at_capacity_breaks_run`）。
+- [x] `FrameCtx::push_viewport/pop_viewport`（深度 8，越界 `debug_assert`）。验收：8 层嵌套单测 → `frame::tests::eight_viewport_levels_nest_and_pop` + `layer0_maps_virtual_center_to_ndc_origin` + `unused_levels_repeat_layer0`。
+- [x] `examples/sprite_bench.rs`：10 万 sprite 随机变换 + 帧时间打印。验收：桌面 ≥60fps（实测值记入 `docs/bench.md`），wasm `?wgl` 可跑 → RTX 2080 Ti/Vulkan：100k 实例 avg 13.27ms = **75.4fps**、300 帧仅 1 次 >20ms、整帧 3 batch；`cargo xtask web sprite_bench` + `?ex=sprite_bench&wgl` 出图并持续打印帧时间。
+- 验收（整段）：`cargo test --workspace --all-features`（render 19 + render 集成 1 + app 6 + doctest 1 = 27 绿）+ `cargo xtask check-all` 三端 0 warning + `cargo xtask clippy` + `cargo fmt --all --check` + `docs/bench.md` 桌面/wasm 两侧手测 → 提交 `P2 batched quad renderer`。
+
+### T3 期间发现并修正的事实（供后续阶段引用）
+1. **`Instance` 是 80B 不是 64B**：设计文档的字段表漏了"着色器要知道 viewport 层"这一项。加了 `layer: f32` 后必需字段共 18 个 f32 = 72B，补到 80B（16 的倍数）。换来的是**一条管线服务 8 层**（`frame.proj[clamp(layer,0,7)]`），不必每层一条 pipeline 或动态 uniform offset。
+2. **`FrameU::proj` 必须是 `[[[f32;4];4];8]`（512B）**，不是 `[[f32;4];8]`（128B）：WGSL 的 `array<mat4x4<f32>,8>` 每个矩阵按列拆成 4 个 `vec4` 且带 16B stride。整块 528B（`time`@512 + 3 个 pad），单测 `frame_uniform_layout_matches_wgsl` 钉住。
+3. **flip 用 `size` 的符号**，不用交换 uv：负宽=左右翻、负高=上下翻，两轴可组合，且 anchor 在 CPU 侧折进 `pos`，实例里不再放 flip 位。
+4. **`RenderPass` 只能在 `end_frame` 内打开**：它借用 encoder 与 surface view，若存进 `Renderer` 就变成自引用。于是帧序固定为 `begin_frame(→清空 pending) → App::draw(push) → end_frame(排序/上传/单 pass/present)`。
+5. **`POLYGON_MODE_LINE` 在 WebGL2 后端常常没有**：`debug_lines` 启用但 adapter 缺能力时降级为实心 + 一条 stderr 提示，不当错误（见 `renderer.rs` 的 `allow_lines`）。
+6. **`Queue::write_texture` 接受未 256 对齐的 `bytes_per_row`**（wgpu 自己暂存），1×1 白图直接写 4 字节即可，不必手写 staging；T4 的大图上传仍要走 `copy_texture_to_buffer` 对齐。
+7. **wasm32-unknown-unknown 的 `std::time::Instant::now()` 会 panic**（std 在该 target 无时钟，`sys/time/unsupported.rs`）。T2 的 `Runner::do_frame` 每帧调它——浏览器里第一帧就会崩（此前只跑到"main 已启动"，没暴露）。现在三端统一 `platform::now_secs()`（wasm = `performance.now()`，需要 web-sys `Performance`）。
+8. **合批键不含 `z`/`insertion`**：它们只决定批内实例顺序，所以 10 万随机 z 仍然只有 2–3 个 batch；跨环形槽时必须断批（顶点缓冲不同），这就是 bench 里 `batch=3 / slot=2` 的来源。
 
 ## T4 VFS + 图集 + 图像解码 + GPU 上传
 - [ ] `sisf-asset/src/path.rs`：`VfsPath` 规范化（统一 `/`、查找键大小写不敏感、拒绝 `..` 越界）。验收：路径穿越单测。
@@ -140,3 +150,5 @@
 `[workspace.dependencies]` 在设计文档列表之外补充：`pollster 1.0.1`、`raw-window-handle 0.6.2`（均在设计 §依赖清单已验证）、`web-sys 0.3`、`js-sys 0.3`（wasm-bindgen 生态配套，canvas/visibilitychange 胶水需要）、`android-activity 0.6`（T2 明确）。`sisf-media` 的 `ogg/mp3/wav/midi/video/gif/simd-jpeg` 为占位 feature，对应解码依赖在 T4/T7/T11 接线（避免提前引入 turbojpeg/cpal 等破坏三端 check）。
 
 T2 追加（只加 feature，不加新 crate）：`web-sys` 开 `Element`（复用页面 canvas）与 `console`（初始化错误打到 devtools）；`crates/sisf-render` 增加 `pollster` 作为 **dev-dependency**（GPU 读回测试用）。
+
+T3 追加（只加 feature，不加新 crate）：`web-sys` 开 `Performance` —— wasm32-unknown-unknown 下 `std::time::Instant::now()` 会 panic（见「T3 期间发现并修正的事实」第 7 条），主循环与 `sprite_bench` 的计时统一走 `platform::now_secs()` = `performance.now()`。`xtask web` 改为接受示例名（`cargo xtask web sprite_bench`），`web/main.js` 按 `?ex=` 动态 import 对应 pkg。

@@ -1,11 +1,17 @@
 //! 批量 quad 渲染器：wgpu 唯一消费者（图集/管线/Bitmap-RT/clip 栈）。
 //!
-//! T2 阶段仅提供 surface 生命周期所需的最小实现（instance/adapter/device +
-//! 清屏呈现）；批量管线、图集与 `push/pop_viewport` 在 T3/T4 展开。
+//! 帧序（T3）：`begin_frame(&FrameU, clear)` → `App::draw` 里 `push` 收集实例 →
+//! `end_frame()` 排序分组、写环形缓冲、单个 render pass 逐批 draw。
+//! 纯逻辑部分（`vertex`/`batch`/`ring`）不碰 GPU 句柄，三端含 wasm 都能跑单测。
 
+pub mod batch;
 pub mod renderer;
+pub mod ring;
+pub mod vertex;
 
-pub use renderer::{FrameStatus, Renderer, RendererError};
-
-/// 统一颜色类型：RGBA、非预乘、sRGB 数值域 `[0,1]`。
-pub type Rgba = [f32; 4];
+pub use batch::{Batch, BatchKey, BatchList, Blend};
+pub use renderer::{DrawStats, FrameStatus, Renderer, RendererError, Rgba, WHITE_EPOCH};
+pub use ring::{DEFAULT_QUADS_PER_SLOT, FRAMES_IN_FLIGHT, InstanceRing};
+pub use vertex::{
+    FrameU, Instance, PROJ_STACK_DEPTH, QUAD_INDICES, QUAD_VERTS, mat4_mul, ortho, ortho_viewport,
+};
