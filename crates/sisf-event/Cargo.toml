@@ -1,0 +1,9 @@
+[package]
+name = "sisf-event"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "引擎事件总线（EngineEvent）与游戏事件解释器（Command/EventRunner）"
+
+[dependencies]
+sisf-sprite.workspace = true

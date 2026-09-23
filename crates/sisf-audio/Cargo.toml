@@ -1,0 +1,10 @@
+[package]
+name = "sisf-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "纯 Rust 混音器（BGM/BGS/ME/SE）+ native/web 设备 pump"
+
+[dependencies]
+sisf-asset.workspace = true
+sisf-media.workspace = true

@@ -1,0 +1,9 @@
+[package]
+name = "sisf-text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "cosmic-text shaping + 字体字形子图集，输出仍是普通 sprite quad"
+
+[dependencies]
+sisf-render.workspace = true

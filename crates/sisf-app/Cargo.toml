@@ -1,0 +1,38 @@
+[package]
+name = "sisf-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "App 主循环 trait、固定 tick、winit/wasm/Android 生命周期与虚拟分辨率缩放"
+
+[dependencies]
+sisf-render.workspace = true
+sisf-sprite.workspace = true
+sisf-text.workspace = true
+sisf-event.workspace = true
+sisf-asset.workspace = true
+sisf-media.workspace = true
+sisf-audio.workspace = true
+winit.workspace = true
+wgpu.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = { workspace = true, optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
+web-sys = { workspace = true, optional = true }
+js-sys = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { workspace = true, optional = true, features = ["native-activity"] }
+
+[features]
+default = ["native"]
+# winit 原生窗口（桌面 + Android）；T7 起追加 cpal、T9 追加 gilrs
+native = ["dep:pollster", "dep:android-activity"]
+# wasm32：wasm-bindgen/web-sys 驱动 + T7 WebAudio pump + T4 fetch loader
+web = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:web-sys", "dep:js-sys"]
+# T12：egui sprite/batch/帧时间面板
+inspector = []

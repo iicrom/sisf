@@ -1,0 +1,46 @@
+[package]
+name = "sisf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SISF：基于 wgpu 的跨平台 2D 引擎门面 crate"
+
+[dependencies]
+sisf-app = { workspace = true }
+sisf-render.workspace = true
+sisf-sprite.workspace = true
+sisf-text.workspace = true
+sisf-event.workspace = true
+sisf-asset.workspace = true
+sisf-audio.workspace = true
+sisf-media = { workspace = true, optional = true }
+sisf-rpgmk = { workspace = true, optional = true }
+
+[features]
+default = ["native"]
+# 启用：sisf-app/native（winit 桌面+Android 窗口；T7 cpal、T9 gilrs 挂这里）
+native = ["sisf-app/native"]
+# 启用：sisf-app/web（wasm-bindgen + WebAudio(T7) + fetch VFS(T4)）
+web = ["sisf-app/web"]
+# 启用：sisf-media/ogg → symphonia ogg+vorbis（T7）
+ogg = ["dep:sisf-media", "sisf-media/ogg"]
+# 启用：sisf-media/mp3 → symphonia mp3（T7）
+mp3 = ["dep:sisf-media", "sisf-media/mp3"]
+# 启用：sisf-media/wav → symphonia wav（T7）
+wav = ["dep:sisf-media", "sisf-media/wav"]
+# 启用：sisf-media/midi → midly + rustysynth（T7）
+midi = ["dep:sisf-media", "sisf-media/midi"]
+# 启用：sisf-media/video → native ffmpeg-next / web video 胶水（T11 桩）
+video = ["dep:sisf-media", "sisf-media/video"]
+# 启用：sisf-media/gif → gif crate，多帧→AnimDef（T4）
+gif = ["dep:sisf-media", "sisf-media/gif"]
+# 启用：sisf-app/inspector → egui 调试面板（T12）
+inspector = ["sisf-app/inspector"]
+# 启用：sisf-rpgmk 兼容层（T11）
+rpgmk = ["dep:sisf-rpgmk"]
+# 启用：sisf-media/simd-jpeg → turbojpeg（native only，T4）
+simd-jpeg = ["dep:sisf-media", "sisf-media/simd-jpeg"]
+
+[[example]]
+name = "hello_window"
+path = "../../examples/hello_window.rs"

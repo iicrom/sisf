@@ -1,0 +1,9 @@
+[package]
+name = "sisf-asset"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "VFS 资源虚拟文件系统 + AssetStore 缓存 + TaskRunner 异步加载"
+
+[dependencies]
+sisf-media.workspace = true

@@ -1,0 +1,9 @@
+[package]
+name = "sisf-sprite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sprite arena：变换/混合/tone/排序/动画状态"
+
+[dependencies]
+sisf-render.workspace = true

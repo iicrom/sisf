@@ -1,0 +1,18 @@
+[package]
+name = "sisf-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "图像/音频/MIDI/视频等媒体解码（平台门控依赖集中处）"
+
+[dependencies]
+
+[features]
+# 占位 feature：对应解码依赖在 T4（图像/GIF）、T7（音频/MIDI）、T11（视频）阶段接线
+ogg = []
+mp3 = []
+wav = []
+midi = []
+video = []
+gif = []
+simd-jpeg = []

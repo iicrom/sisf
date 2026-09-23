@@ -1,0 +1,9 @@
+[package]
+name = "sisf-rpgmk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "RPG Maker MV/MZ 移植兼容层（Map/Event translate，不进核心）"
+
+[dependencies]
+sisf-app.workspace = true

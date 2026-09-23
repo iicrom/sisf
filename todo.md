@@ -6,15 +6,15 @@
 依赖链：T1→T2→T3→T4→{T5,T7}；T5→T6；{T5,T7}→T8；T2→T9；{T6,T8,T9}→T10→T11→T12。
 
 ## T0 建立基线
-- [ ] 本文件入仓；`git init`（若未初始化）+ 首次提交含现有桩代码。验收：`git log --oneline` ≥1 条。
+- [x] 本文件入仓；`git init`（若未初始化）+ 首次提交含现有桩代码。验收：`git log --oneline` ≥1 条。（62c39bd）
 
 ## T1 workspace + xtask 脚手架
-- [ ] 根 `Cargo.toml` 改 `[workspace] members=["crates/*","xtask"]` + `[workspace.package] version / edition="2024" / license`；删除根 `src/`。验收：`cargo metadata` 成功。
-- [ ] 建 10 个 crate 与 `Cargo.toml`：`sisf-render` `sisf-sprite` `sisf-text` `sisf-event` `sisf-asset` `sisf-media` `sisf-audio` `sisf-app` `sisf-rpgmk` `sisf`；依赖边：`asset→media`、`render→asset`、`sprite→render`、`text→render`、`event→sprite`、`audio→{asset,media}`、`app→全部`、`rpgmk→app`、`sisf→app`。验收：`cargo check` 通过（每 crate 仅空 `lib.rs` + 一行 `//!` 说明）。
-- [ ] `[workspace.dependencies]` 统一钉版：wgpu 30.0.1、winit 0.30.13、bytemuck 1.25.2、rect-packer 0.2.1、etagere 0.3.0、serde 1.0.229、ron 0.12.2、thiserror。验收：子 crate 全部 `{ workspace = true }`。
-- [ ] `crates/sisf/Cargo.toml` feature 矩阵：`default=["native"]`、`native`、`web`、`ogg`、`mp3`、`wav`、`midi`、`video`、`gif`、`inspector`、`rpgmk`、`simd-jpeg`，每个 feature 标注它启用哪个 crate/dep。验收：`cargo tree -e features -p sisf` 与预期一致。
-- [ ] `xtask` crate：`check-all`（win `--all-features` / wasm32 `--no-default-features --features web` / android `--no-default-features --features native`）、`fmt`、`clippy`、`web`、`golden`、`wasm-test`、`android`；任一子进程失败即非零退出。验收：`cargo xtask check-all` 三端绿。
-- [ ] `.cargo/config.toml`：`alias.xtask`。验收：`cargo xtask check-all` 可直接调用。
+- [x] 根 `Cargo.toml` 改 `[workspace] members=["crates/*","xtask"]` + `[workspace.package] version / edition="2024" / license`；删除根 `src/`。验收：`cargo metadata` 成功。
+- [x] 建 10 个 crate 与 `Cargo.toml`：`sisf-render` `sisf-sprite` `sisf-text` `sisf-event` `sisf-asset` `sisf-media` `sisf-audio` `sisf-app` `sisf-rpgmk` `sisf`；依赖边：`asset→media`、`render→asset`、`sprite→render`、`text→render`、`event→sprite`、`audio→{asset,media}`、`app→全部`、`rpgmk→app`、`sisf→app`。验收：`cargo check` 通过（每 crate 仅空 `lib.rs` + 一行 `//!` 说明）。
+- [x] `[workspace.dependencies]` 统一钉版：wgpu 30.0.1、winit 0.30.13、bytemuck 1.25.2、rect-packer 0.2.1、etagere 0.3.0、serde 1.0.229、ron 0.12.2、thiserror。验收：子 crate 全部 `{ workspace = true }`。
+- [x] `crates/sisf/Cargo.toml` feature 矩阵：`default=["native"]`、`native`、`web`、`ogg`、`mp3`、`wav`、`midi`、`video`、`gif`、`inspector`、`rpgmk`、`simd-jpeg`，每个 feature 标注它启用哪个 crate/dep。验收：`cargo tree -e features -p sisf` 与预期一致。
+- [x] `xtask` crate：`check-all`（win `--all-features` / wasm32 `--no-default-features --features web` / android `--no-default-features --features native`）、`fmt`、`clippy`、`web`、`golden`、`wasm-test`、`android`；任一子进程失败即非零退出。验收：`cargo xtask check-all` 三端绿。
+- [x] `.cargo/config.toml`：`alias.xtask`。验收：`cargo xtask check-all` 可直接调用。
 - 验收（整段）：`cargo xtask clippy` + `check-all` 绿 → 提交 `P1a workspace+xtask`。
 
 ## T2 跨平台开窗 + surface 生命周期
@@ -128,3 +128,6 @@
 2. 每阶段结束时这三种组合均无 warning：`--all-features`（win）、`--no-default-features --features web`（wasm32）、`--no-default-features --features native`（android）。
 3. 不引入本清单外的依赖；确需新增时先改清单再改 `Cargo.toml`。
 4. 平台不支持的能力一律 feature 关闭 + 文档标注，禁止空实现散落（除 T11 显式声明的视频桩）。
+
+## 附：钉版增补（T1 执行时按 DoD-3 登记）
+`[workspace.dependencies]` 在设计文档列表之外补充：`pollster 1.0.1`、`raw-window-handle 0.6.2`（均在设计 §依赖清单已验证）、`web-sys 0.3`、`js-sys 0.3`（wasm-bindgen 生态配套，canvas/visibilitychange 胶水需要）、`android-activity 0.6`（T2 明确）。`sisf-media` 的 `ogg/mp3/wav/midi/video/gif/simd-jpeg` 为占位 feature，对应解码依赖在 T4/T7/T11 接线（避免提前引入 turbojpeg/cpal 等破坏三端 check）。

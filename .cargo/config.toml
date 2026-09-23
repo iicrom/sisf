@@ -1,0 +1,6 @@
+[alias]
+xtask = "run --package xtask --"
+
+[target.wasm32-unknown-unknown]
+# 占位 runner：wasm 产物通过 `cargo xtask web` 起本地服务后在浏览器验证（T12 换成自动开浏览器）
+runner = "echo 'run via `cargo xtask web` instead'"
