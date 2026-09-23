@@ -18,14 +18,21 @@
 - 验收（整段）：`cargo xtask clippy` + `check-all` 绿 → 提交 `P1a workspace+xtask`。
 
 ## T2 跨平台开窗 + surface 生命周期
-- [ ] `sisf-app/src/config.rs`：`AppConfig{ title, virtual_size:(u32,u32), scale_mode: Fit|Fill|IntegerFit, letterbox: Rgba, tick_hz: f64 = 60.0, clear: Rgba }`。验收：默认 544×416 可构造。
-- [ ] `sisf-app/src/app.rs`：`trait App { fn on_event(&mut,self,&[EngineEvent],&mut FrameCtx); fn tick(&mut,self,dt:Duration,&mut FrameCtx); fn draw(&mut,self,alpha:f32,&mut Renderer); }`。验收：签名不跨帧持有 wgpu 借用。
-- [ ] `platform/native.rs`：winit 0.30 `EventLoop` + `ActiveEventLoop`；wgpu `Instance`（`Backends::all()`）+ `SurfaceTarget` + `Surface::configure`；`SurfaceError::Lost|Outdated` → 重配。验收：Windows 出窗口并清成 `clear` 色。
-- [ ] `platform/wasm.rs` + `web/{index.html,main.js}`：wasm 下 winit 无 `run()`，用 `Canvas` + `requestAnimationFrame` 闭包驱动同一个 `frame()`。验收：`cargo xtask web` 起本地服务后 canvas 有色；WebGPU 与 WebGL2（`?wgl`）各测一次。
-- [ ] `platform/android.rs`：`android-activity` 0.6 配置 + `_native_activity` manifest metadata；`Resumed` 建 surface、`Suspended` 释放 `Surface` 与 GPU 资源。验收：android 端 check 绿，`docs/android.md` 写出构建/安装步骤。
-- [ ] 生命周期：`Lifecycle{Resumed,Suspended,Focused(bool),CloseRequested}` 上报 `App::on_event`；`Suspended` 冻结累加器；`Resized`/`scale_factor` → 重算投影与输入坐标映射。验收：Win 最小化→恢复不 panic、不丢 surface。
-- [ ] iOS：target 未安装 → 仅在 `docs/platforms.md` 记录启用步骤（`rustup target add aarch64-apple-ios` + Xcode），代码复用 `platform/native.rs`。验收：文档段落存在。
-- 验收（整段）：三端 check + Windows 手测 → 提交 `P1b app loop+lifecycle`。
+- [x] `sisf-app/src/config.rs`：`AppConfig{ title, virtual_size:(u32,u32), scale_mode: Fit|Fill|IntegerFit, letterbox: Rgba, tick_hz: f64 = 60.0, clear: Rgba }`。验收：默认 544×416 可构造。→ `frame::tests::default_config_is_rpgmaker_size` 绿。
+- [x] `sisf-app/src/app.rs`：`trait App { fn on_event(&mut,self,&[EngineEvent],&mut FrameCtx); fn tick(&mut,self,dt:Duration,&mut FrameCtx); fn draw(&mut,self,alpha:f32,&mut Renderer); }`。验收：签名不跨帧持有 wgpu 借用（`renderer` 存在 `RunState` 内，`draw` 只借 `&mut Renderer`）。
+- [x] `platform/native.rs`：winit 0.30 `EventLoop` + `ActiveEventLoop`；wgpu `Instance`（`Backends::all()`）+ `create_surface_unsafe(RawHandle)` + `Surface::configure`；wgpu 30 用 `CurrentSurfaceTexture::{Lost,Outdated}` → 按缓存配置重配。验收：`hello_window` 出窗口、每帧 `FrameStatus::Presented`（hwnd 与可见窗口一致），清屏色由 `crates/sisf-render/tests/readback.rs` 的 GPU 读回断言（`BitBlt` 抓不到 flip-model 内容，见 `docs/platforms.md`）。
+- [x] `platform/wasm.rs` + `web/{index.html,main.js}`：wasm 下 winit 无 `run()`，用 `spawn_app` + 页面既有 `<canvas id="sisf">`，重绘由 `Window::request_redraw()` 链交给浏览器 rAF。验收：`cargo xtask web` 起服务后 `?wgl`（WebGL2）控制台打出"main 已启动"且无 adapter 报错；WebGPU 路径在无权 GPU 的自动化浏览器里报 "No available adapters"（属环境限制，需人工开一次页面复验）。
+- [x] `platform/android.rs`：`android-activity` 0.6（`native-activity`）+ `EventLoop::builder().with_android_app()`；`Resumed` 建 surface、`Suspended` 释放 `Surface` 与 GPU 资源（`sync_suspend` 在 android 上置 `renderer = None`）。验收：android 端 check 绿 + `docs/android.md`（cdylib 模板/manifest/真机清单）。
+- [x] 生命周期：`Lifecycle{Resumed,Suspended,Focused(bool),CloseRequested}` 上报 `App::on_event`；挂起时 `last = None` 不吃时间（T8 冻结累加器同理）；`Resized`/`ScaleFactorChanged` → 重算投影 + 请求重配。验收：实测最小化 → `Suspended`，恢复 → `Resumed` 并继续出帧，无 panic、surface 未丢。
+- [x] iOS：target 未安装 → `docs/platforms.md` 记录启用步骤（`rustup target add aarch64-apple-ios*` + Xcode），代码复用 `platform/native.rs`。
+- 验收（整段）：`cargo xtask check-all` 三端绿 + `cargo xtask clippy` 无 warning + `cargo test`（frame 3 项 + readback 1 项）绿 + Windows 最小化/恢复手测 → 提交 `P1b app loop+lifecycle`。
+
+### T2 期间发现并修正的事实（供后续阶段引用）
+1. **winit 0.30 的 `RedrawRequested` 不会因 `ControlFlow::Poll` 自动送达**，必须 `Window::request_redraw()` 链式驱动；因此三端统一用 `ControlFlow::Wait`，`Runner::do_frame` 末尾续帧、`sync_suspend` 在恢复时踢帧。
+2. **winit 0.30 wasm 无 `PollStrategy::WebAnimationFrame` / `WindowControls`**（0.29 遗留），只有 `IdleCallback|Scheduler`。
+3. **`wgpu::Color` 按线性空间解释**，而 `Rgba` 约定为 sRGB 数值域：`to_color` 必须 sRGB→线性，否则 0.35 会渲染成 160/255（readback 测试实测并修正）。
+4. wgpu 30 的 `RenderPassColorAttachment` 新增必填 `depth_slice`，且 `get_current_texture()` 返回 `CurrentSurfaceTexture` 枚举（不再有 `SurfaceError`）。
+5. `wasm-bindgen` 不允许 `main` 同时被 bin 与 `#[wasm_bindgen(start)]` 导出：示例改为 `sisf_start()` + `real_main()`。
 
 ## T3 批量 quad 渲染器
 - [ ] `sisf-render/src/vertex.rs`：`#[repr(C)] Instance{ pos:Vec2, size:Vec2, uv0:Vec2, uv1:Vec2, color:[f32;4], rot:f32, tone:[f32;4], _pad:[f32;2] }`（64B）+ 单位 quad 顶点/索引缓冲。验收：`const _: () = assert!(size_of::<Instance>()==64)` + 字段偏移单测。
@@ -131,3 +138,5 @@
 
 ## 附：钉版增补（T1 执行时按 DoD-3 登记）
 `[workspace.dependencies]` 在设计文档列表之外补充：`pollster 1.0.1`、`raw-window-handle 0.6.2`（均在设计 §依赖清单已验证）、`web-sys 0.3`、`js-sys 0.3`（wasm-bindgen 生态配套，canvas/visibilitychange 胶水需要）、`android-activity 0.6`（T2 明确）。`sisf-media` 的 `ogg/mp3/wav/midi/video/gif/simd-jpeg` 为占位 feature，对应解码依赖在 T4/T7/T11 接线（避免提前引入 turbojpeg/cpal 等破坏三端 check）。
+
+T2 追加（只加 feature，不加新 crate）：`web-sys` 开 `Element`（复用页面 canvas）与 `console`（初始化错误打到 devtools）；`crates/sisf-render` 增加 `pollster` 作为 **dev-dependency**（GPU 读回测试用）。

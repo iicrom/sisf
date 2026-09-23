@@ -9,6 +9,10 @@ description = "批量 quad 渲染器：wgpu 唯一消费者（图集/管线/Bitm
 sisf-asset.workspace = true
 wgpu.workspace = true
 bytemuck.workspace = true
+thiserror.workspace = true
 
 [features]
 debug_lines = []
+
+[dev-dependencies]
+pollster.workspace = true

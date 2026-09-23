@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <title>SISF hello_window (T2)</title>
+    <style>
+      body {
+        margin: 0;
+        background: #101014;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+      }
+      /* 引擎在 wasm 下复用这个 canvas（见 platform::wasm::window_attrs），
+         CSS 尺寸决定物理解码后的窗口大小，height 由 FrameCtx 做虚拟分辨率映射。 */
+      canvas#sisf {
+        width: 544px;
+        height: 416px;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="sisf" width="544" height="416"></canvas>
+    <script type="module" src="main.js"></script>
+  </body>
+</html>

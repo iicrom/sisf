@@ -1552,6 +1552,7 @@ dependencies = [
  "android-activity",
  "js-sys",
  "pollster",
+ "raw-window-handle",
  "sisf-asset",
  "sisf-audio",
  "sisf-event",
@@ -1597,7 +1598,9 @@ name = "sisf-render"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "pollster",
  "sisf-asset",
+ "thiserror 2.0.20",
  "wgpu",
 ]
 
