@@ -120,7 +120,14 @@ state=running kind=worklet worklet=yes baseLatency=0.0100s outputLatency=0.0400s
 | 环境 | 通路 | baseLatency | outputLatency | 排队 | 合计 | underrun |
 | --- | --- | --- | --- | --- | --- | --- |
 | Chrome / Windows，`?ex=audio_demo&wgl`（软件 GPU WARP），修账前 | worklet | 0.0100s | 0.0400s | **不可信**（双扣，见上节） | — | 11392f（t<1s 一次性，之后 68s 全程不涨） |
-| 同上，修账后 | | | | | | |
+| 同上，修账后（t≈85fps 稳态） | worklet | 0.0100s | 0.0320s | 1024~1280f = **21.3~26.7ms** | **68.7ms**（= 10 + 32 + 26.7） | 稳态每 tick 增量为 0；残余 ~384f/s（见下节，逐条对得上长帧） |
+
+> **"排队"列就是引擎唯一可控的那一段**：合计 68.7ms 里有 42ms 是 Chrome/这块声卡的
+> `baseLatency + outputLatency`（`outputLatency` 还会随设备在 32~40ms 之间跳），与引擎无关。
+> 清单目标 ≤~21ms@1024 指的是可控那一段，修账后实测贴着 1024（=21.3ms）走，`buffered` 全程不为负。
+>
+> 这一行是直接从页面里取的：动态 import 胶水模块（与 bundle 同一个 URL ⇒ 同一个实例）后
+> `sisfAudioStats()`，每个 rAF 采一次，跑 8s。取数脚本见下节的"怎么复现"。
 
 > 表里第一行是**真实控制台读数**，但它是在双扣那版上取的：`baseLatency`/`outputLatency`/通路/
 > 解锁/欠载只涨一次这几项照旧有效，`buffered` 那一列则被记账错误污染 ⇒ 合计延迟要等修账后的
@@ -156,6 +163,43 @@ state=running kind=worklet worklet=yes baseLatency=0.0100s outputLatency=0.0400s
 >
 > 另一条防线：`node --check crates/sisf-audio/src/audio_pump.js`（`WORKLET_SRC` 是模板字符串，
 > 注释里写反引号会当场截断它，而 cargo 一侧毫无感觉 —— 修账时真踩过两次）。
+
+### 残余的 ~384 帧/秒：是主线程的长尾，不是账错
+
+修账后的浏览器复验并没有把 `underrun` 压到绝对 0，但把它**定性**清楚了。取数办法（不用手抄控制台，
+直接从页面里问胶水要数）：
+
+```js
+// DevTools Console：与 bundle 同 URL ⇒ 拿到的是同一个模块实例
+const mod = await import('/pkg/snippets/<hash>/src/audio_pump.js');
+const st = () => mod.sisfAudioStats();          // [rate, buffered, underrun, overflow, blocks, quanta, ...]
+let prev = st(), t0 = performance.now(), hits = [];
+for (;;) { await new Promise(r => requestAnimationFrame(r));
+  const t = performance.now(), s = st();
+  if (s[2] > prev[2]) hits.push([+(t - t0).toFixed(1), s[2] - prev[2], s[1]]);
+  prev = s; t0 = t; }
+```
+
+8 秒窗口的实测（Chrome / Windows / WARP，页面自身 ~85fps）：
+
+| 量 | 读数 |
+| --- | --- |
+| tick 数 / 帧时长 p50 / p90 / p99 / max | 681 / 12.0 / 15.0 / 25.0 / **28.0** ms |
+| 时长 >20ms 的 tick | 24 |
+| 出现 `underrun` 增量的 tick | **8**（增量都是 384f） |
+| 时长 ≤20ms 的 tick 的增量 | **0**（673 个 tick 全零） |
+| 增量时刻的报出深度 | 1280f |
+
+对得上的算术：`TARGET_FRAMES = 1024` 就是 **21.3ms 的预算**，一个 tick 只要不超过它就不会缺；
+超过就缺 `dt − 预算` 那点量，再按 128 帧的 quant 向上取整 ⇒ 21.6~28ms 的长帧正好各缺
+**384 帧 = 3 个 quant = 8ms**。而 681 个 tick 里只有 8 个跨过这条线 —— 报出来的深度全程贴着目标、
+不为负、与真实排队量一致（node 核算台那两条判据在浏览器里同样成立），所以这是**主线程抖动撞预算**，
+不是第 12 条那种账目错误。
+
+要不要吃掉这条尾巴，是一个**拿延迟换保险**的定价问题，不是 bug 修复：`TARGET_FRAMES` 抬到 1536
+（32ms）就能盖住这里的 p99=25ms，可控延迟从 21.3ms 变 32ms（合计那列再加 ~11ms）。清单目标写的是
+"≤~21ms@1024"，所以本阶段**保留 1024**、把长尾如实记在这里。native 侧不需要这么纠结：cpal 的
+拉数线程不会像浏览器主线程这样抖（实测 13s `underrun+0`，见 `docs/audio.md`）。
 
 ## 挂起与恢复
 

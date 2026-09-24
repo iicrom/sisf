@@ -179,12 +179,13 @@
 一起装进 node 跑 48k 虚拟时间线；判据 = 报的深度 == 真实排队量 ±1 quant、不为负、预热后
 `underrun` 不涨、60fps 深度恰为 1024）：fps=60 1024~1120f 21.3~23.3ms err 2f +0 / 50 +0 /
 42 1280~1440 +0 / 30 1920~2080 +0 / 20 2880~3040 +0；反例（修账前的胶水放同一位置）
-`FAIL 最大差 238507 帧`。见下第 12、14 条。⚠️ **仍差人工一次**：硬刷新
-`http://127.0.0.1:8080/?ex=audio_demo&wgl` 并点一下页面，取修账后的 Console 那行填
-`docs/audio-web.md` 实测表的"排队/合计"两列（第一行修账前的真实读数已入表并标注不可信项）。
+`FAIL 最大差 238507 帧`。见下第 12、14 条。人工复验**已做**（用户硬刷新 + 点击，我从页面里直接采
+`sisfAudioStats()`）：`state=running kind=worklet`，稳态 `buffered=1024~1280f`（=21.3~26.7ms，
+合计 68.7ms 里 42ms 是 `baseLatency 10ms + outputLatency 32ms`），`buffered` 全程不为负 ⇒ 实测表
+两列已填。残余是主线程长尾不是账错，见下第 15 条。
 - [x] `sisf-media/src/midi.rs`（feature `midi`）：`midly 0.5.3` 解析 + `rustysynth 1.3.6` SF2 合成，`SoundBank::from_sf2(&[u8])` 经 VFS（**引擎不附带 SoundFont**），MIDI 作为一路 Voice 参与同一 Mixer。验收：给定用户 SF2 时播放 fixture `.mid`；无 SF2 返回 `MissingSoundBank` 并提示（不 panic）；文档给出"离线把 .mid 预渲染成 .ogg"退路。→ `midi::tests` 9 项（`midi_info` 轨数/时长、`MidiDecoder` 定长读、`seek_sample(0)` 回绕、循环类型分派、无 bank ⇒ `MissingSoundBank`；其中 2 项需要用户素材，做成 env 开关：`SISF_SF2=/path/to/bank.sf2 cargo test -p sisf-media --features midi -- --ignored`，断"同参数两次渲染逐位一致"与"内部循环模式永不结束、只在 0 处回绕"）+ 真机两遍：demo 的 `M` cue 打出 `缺少 SoundFont（SF2）: …或离线把 .mid 预转成 .ogg`，通道状态不变、不 panic。SF2 那条只能由用户自备素材自证（仓库故意不存，退路命令在 `docs/audio.md`）。
 - [x] `examples/audio_demo.rs`：BGM 循环 + `Space` 播 SE + `M` 播 `.mid`（键盘事件本阶段还没有，改成确定性时间线驱动同一套 `fire()`，见下第 8 条）。验收：`cargo xtask check-all` 含 `--features midi` 组合绿。→ 示例注册带 `required-features = ["ogg","mp3","wav"]`，故 web-only / native-only 两组是**跳过**而不是失败；`xtask web` 构建 feature 从 `web` 改成 `WEB_AUDIO_FEATURES = "web,ogg,mp3,wav,midi"`。四份 fixture 已进 `web/assets/manifest.txt`。
-- 验收（整段）：mixer 单测 + Win/Chrome 听测 → 提交 `P6 audio+ogg/mp3/wav+midi`。落地说明见 `docs/audio.md`（四层与 feature 边界、通道模型与循环默认值、三个容器三种循环点读法、native 主线程混音 + SPSC 环、MIDI 三档兜底、能力/平台矩阵、两个真坑）+ `docs/audio-web.md`（worklet 与 ScriptProcessor 的语义差、深度记账与帧率阈值两节、延迟口径、手测步骤与实测表）。→ 已提交 **`3ef3c66`**：`cargo test -p sisf-audio --all-features` **34 绿**（mixer 19 + bus 8 + pump_native 7）+ `cargo test --workspace --all-features` 全绿 0 红（2 项 `SISF_SF2` ignored）+ `cargo xtask check-all` 四组 0 warning + `cargo xtask clippy`（win + wasm，`-D warnings`）+ `cargo xtask fmt --check` 净 + `node --check` 与上面那条 node 侧契约测试 + Windows 真设备有界复跑（第 4 条那行）。⚠️ 整段验收还差**人工两听**：Win 插拔耳机/切默认端点；Chrome-wasm 修账后的复验读数。
+- 验收（整段）：mixer 单测 + Win/Chrome 听测 → 提交 `P6 audio+ogg/mp3/wav+midi`。落地说明见 `docs/audio.md`（四层与 feature 边界、通道模型与循环默认值、三个容器三种循环点读法、native 主线程混音 + SPSC 环、MIDI 三档兜底、能力/平台矩阵、两个真坑）+ `docs/audio-web.md`（worklet 与 ScriptProcessor 的语义差、深度记账与帧率阈值两节、延迟口径、手测步骤与实测表）。→ 已提交 **`3ef3c66`**：`cargo test -p sisf-audio --all-features` **34 绿**（mixer 19 + bus 8 + pump_native 7）+ `cargo test --workspace --all-features` 全绿 0 红（2 项 `SISF_SF2` ignored）+ `cargo xtask check-all` 四组 0 warning + `cargo xtask clippy`（win + wasm，`-D warnings`）+ `cargo xtask fmt --check` 净 + `node --check` 与上面那条 node 侧契约测试 + Windows 真设备有界复跑（第 4 条那行）。⚠️ 整段验收还差两件人工：Win 播放中切默认输出端点/插拔耳机（判据 `streams` 1→2）；这两听之外，Chrome 侧的"缺口是否可闻"也只能由耳朵定 —— 若可闻就把 `TARGET_FRAMES` 抬到 1536（可控延迟 21.3→32ms，见 `docs/audio-web.md` 的定价段）。
 
 ### T7 期间发现并修正的事实（供后续阶段引用）
 1. **`sisf/{ogg,mp3,wav,midi}` 必须同时转发 `sisf-media/*` 与 `sisf-audio/*`**。第一版只转给 media，
@@ -258,6 +259,14 @@
     次调用看得见就会退化成每 rAF 只补 256 帧的一个 block，实测 `want=2048 pushed=1024` 仍欠载），所以
     JS 里存了 `catchUpFrames`；② 判据用 `refill_samples(2286, cap) > 2286` 这种"一帧 30fps 也补得回来"
     的形状断言，别只断"等于 TARGET"。
+15. **浏览器上的残余 `underrun` 是主线程长尾，别再去改账**。修账后从页面里每 rAF 采一次
+    `sisfAudioStats()`（同 URL 动态 import ⇒ 同一个模块实例），8s / 681 tick：帧时长
+    p50 12ms、p99 25ms、max 28ms，24 个 tick >20ms，**8 个 tick 有增量且每个都是 384 帧**，
+    其余 673 个 tick 全零。算术对得上：`TARGET_FRAMES = 1024` 就是 21.3ms 的预算，tick 超过它就缺
+    `dt − 预算` 再按 128 的 quant 向上取整 ⇒ 3 个 quant = 8ms。所以这是**定价问题**（要不要拿延迟换
+    保险：`TARGET_FRAMES=1536` 可盖住 p99=25ms，可控延迟 21.3→32ms），不是第 12 条那种账错；清单写的
+    是 ≤~21ms@1024 ⇒ 本阶段保留 1024 并把长尾记进 `docs/audio-web.md`。native 侧无此纠结（cpal 线程
+    不抖，13s `underrun+0`）。
 
 
 ## T8 动画 + MoveRoute + 固定 tick
