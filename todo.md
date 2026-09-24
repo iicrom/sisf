@@ -173,11 +173,18 @@
 - [x] `sisf-audio/src/mixer.rs`（纯 Rust，不碰设备）：`Voice{data,pos,gain,pan,loop_start,loop_end,rate}`、`render(&mut,self,out:&mut [f32])` 交织立体声；通道 `Bgm/Bgs/Me/Se`（Se 多路复用 + voice 上限抢占）、`fade`、`play/stop/pause/resume/suspend`。验收：`render` 确定性单测（四端可跑，无设备）。→ `mixer::tests` **19 项**，含 `render_is_bitwise_deterministic`（同输入两遍逐位相等）/`se_pool_preempts_the_oldest_voice`/`bgm_replacement_crossfades_the_old_voice`/`fade_stops_the_channel_exactly_at_requested_frames`（淡出按帧不按墙钟）/`suspend_freezes_positions_and_silences`/`pause_silences_the_channel_and_freezes_its_position`（通道级暂停是独立状态）/`output_is_hard_clamped`/`invalid_inputs_are_rejected_not_panicked`。`mixer` 无条件编译，任何 feature 组合都在。
 - [x] `sisf-media/src/audio.rs`：`trait Decoder{ channels, sample_rate, read, seek_sample }`，`symphonia 0.6.1 features=["ogg","vorbis","mp3","wav"]`（纯 Rust，wasm ✓）；`lewton 0.10.2` 仅作 `ogg-lewton` 回退 feature（默认关）。验收：OGG/MP3/WAV fixture 采样长度断言。→ `audio::tests` 7 项 + `audio::lewton_backend::tests` 5 项（`ogg-lewton` 下）：三份 fixture 的帧数/时长/采样率逐条断言（OGG 88200 帧 = 2.00s@44.1k、WAV 22050、MP3 44100），`sniff` 按魔数分派（不认扩展名）、未开 feature 的容器报 `UnsupportedFormat`。
 - [x] 循环点：`lofty 0.25.4` 读元数据 → `AudioData{loop_start_samples,loop_end_samples}`。验收：带 loop 的 OGG 无缝循环（samples 级断言 + 听测）。→ fixture 的 `LOOPSTART/LOOPEND = [8820, 35280)` 解码后原样保留（`audio::tests` 逐值断言 + `bus::tests::ogg_loop_tags_survive_into_a_voice` 在 `AudioBus` 通路上断言 pump 80 次后落在循环区内）；`metadata_loop_points_wrap_seamlessly`/`whole_file_loop_restarts_at_zero` 钉住"越过 `loop_end` 才回绕、intro 照常播完"。听测：`cargo run -p sisf --example audio_demo --features ogg,mp3,wav,midi -- 14` 复跑，12s OGG 回绕处 `underrun+0`（修前是 `+4480`，见下第 7 条）。
-- [x] `pump_native.rs`：`cpal 0.18.2` ~~回调内直接 `Mixer::render`~~（做不到，见下第 5 条：改为主线程混音 + SPSC 环，锁仍为 0）；设备变更与 `StreamError` 重建流。验收：Win 播放无爆音，插拔耳机不断流。→ `pump_native::tests` 6 项（环跨线程搬运逐样本对齐、环绕与 overflow 计数、`pump_runs_silently_without_a_device`）+ 真设备复跑 14s：`ring=1120f underrun=64s overflow=0s callbacks=1388 streams=1 err=-`、逐秒 `underrun+0`、`混音推进 13.91s / 墙钟 14.00s（99%）`。64 样本全部来自"启动时宿主无默认输出设备 → `OPEN_RETRY` 2s 后拿到 `Headphones … @48000Hz/2ch F32`"那一窗（降级路径被真实撞到）。⚠️ **插拔耳机/切默认设备不断流仍待人工**（需要物理操作，机器替代不了）。
-- [x] `pump_web.rs` + ~~`web/audio_worklet.js`~~（落地成 `crates/sisf-audio/src/audio_pump.js` 内联 Blob，见下第 6 条）：`AudioWorklet`（不可用则 `ScriptProcessor`）从 WASM 拉混音输出；`AudioBus::suspend/resume` 绑 visibilitychange + 首次点击解锁。验收：Chrome-wasm 播 BGM/SE，`docs/audio-web.md` 记延迟实测（目标 ≤~21ms@1024）。→ 编译面绿：`cargo xtask check-all` 新增的第四组 `wasm32 --no-default-features --features web,ogg,mp3,wav,midi`（含 `--all-targets`，即示例本身）0 warning。通路选择/解锁/延迟口径写成 `docs/audio-web.md`。⚠️ **Chrome 听测与延迟实测表仍空**（我不能导航；`cargo xtask web audio_demo` 已备好，等你开 `http://127.0.0.1:8080/?ex=audio_demo` 后贴 Console 那行 `state=… kind=… total=…ms`）。
+- [x] `pump_native.rs`：`cpal 0.18.2` ~~回调内直接 `Mixer::render`~~（做不到，见下第 5 条：改为主线程混音 + SPSC 环，锁仍为 0）；设备变更与 `StreamError` 重建流。验收：Win 播放无爆音，插拔耳机不断流。→ `pump_native::tests` 7 项（环跨线程搬运逐样本对齐、环绕与 overflow 计数、`pump_runs_silently_without_a_device`、`refill_target_covers_a_whole_slow_frame` 钉住第 14 条那个帧率阈值）+ 真设备复跑 14s（完整日志不过 pipe）：`ring=1024~1152f underrun=64s overflow=0s callbacks=1389 streams=1 err=-`、逐秒 `underrun+0`、`混音推进 13.93s / 墙钟 14.00s（99%）`。64 样本全部来自"启动时宿主无默认输出设备 → `OPEN_RETRY` 2s 后拿到 `Headphones … @48000Hz/2ch F32`"那一窗（降级路径被真实撞到）。⚠️ **插拔耳机/切默认设备不断流仍待人工**（需要物理操作，机器替代不了；客观判据 = `开过 N 条流` 从 1 变 2，而那 14s 里 `streams=1` ⇒ 这条路径至今**没有**被真实走过）。
+- [x] `pump_web.rs` + ~~`web/audio_worklet.js`~~（落地成 `crates/sisf-audio/src/audio_pump.js` 内联 Blob，见下第 6 条）：`AudioWorklet`（不可用则 `ScriptProcessor`）从 WASM 拉混音输出；`AudioBus::suspend/resume` 绑 visibilitychange + 首次点击解锁。验收：Chrome-wasm 播 BGM/SE，`docs/audio-web.md` 记延迟实测（目标 ≤~21ms@1024）。→ 编译面绿：`cargo xtask check-all` 新增的第四组 `wasm32 --no-default-features --features web,ogg,mp3,wav,midi`（含 `--all-targets`，即示例本身）0 warning。通路选择/解锁/延迟口径写成 `docs/audio-web.md`。这一行浏览器真实读数（`state=running kind=worklet worklet=yes baseLatency=0.0100s outputLatency=0.0400s`）反过来暴露了两个只有看数才会发现的 pump 缺陷，修完的可复现证据是
+`node crates/sisf-audio/tests/pump_bookkeeping.mjs`（把胶水连同 `WORKLET_SRC` 里**真实的**处理器
+一起装进 node 跑 48k 虚拟时间线；判据 = 报的深度 == 真实排队量 ±1 quant、不为负、预热后
+`underrun` 不涨、60fps 深度恰为 1024）：fps=60 1024~1120f 21.3~23.3ms err 2f +0 / 50 +0 /
+42 1280~1440 +0 / 30 1920~2080 +0 / 20 2880~3040 +0；反例（修账前的胶水放同一位置）
+`FAIL 最大差 238507 帧`。见下第 12、14 条。⚠️ **仍差人工一次**：硬刷新
+`http://127.0.0.1:8080/?ex=audio_demo&wgl` 并点一下页面，取修账后的 Console 那行填
+`docs/audio-web.md` 实测表的"排队/合计"两列（第一行修账前的真实读数已入表并标注不可信项）。
 - [x] `sisf-media/src/midi.rs`（feature `midi`）：`midly 0.5.3` 解析 + `rustysynth 1.3.6` SF2 合成，`SoundBank::from_sf2(&[u8])` 经 VFS（**引擎不附带 SoundFont**），MIDI 作为一路 Voice 参与同一 Mixer。验收：给定用户 SF2 时播放 fixture `.mid`；无 SF2 返回 `MissingSoundBank` 并提示（不 panic）；文档给出"离线把 .mid 预渲染成 .ogg"退路。→ `midi::tests` 9 项（`midi_info` 轨数/时长、`MidiDecoder` 定长读、`seek_sample(0)` 回绕、循环类型分派、无 bank ⇒ `MissingSoundBank`；其中 2 项需要用户素材，做成 env 开关：`SISF_SF2=/path/to/bank.sf2 cargo test -p sisf-media --features midi -- --ignored`，断"同参数两次渲染逐位一致"与"内部循环模式永不结束、只在 0 处回绕"）+ 真机两遍：demo 的 `M` cue 打出 `缺少 SoundFont（SF2）: …或离线把 .mid 预转成 .ogg`，通道状态不变、不 panic。SF2 那条只能由用户自备素材自证（仓库故意不存，退路命令在 `docs/audio.md`）。
 - [x] `examples/audio_demo.rs`：BGM 循环 + `Space` 播 SE + `M` 播 `.mid`（键盘事件本阶段还没有，改成确定性时间线驱动同一套 `fire()`，见下第 8 条）。验收：`cargo xtask check-all` 含 `--features midi` 组合绿。→ 示例注册带 `required-features = ["ogg","mp3","wav"]`，故 web-only / native-only 两组是**跳过**而不是失败；`xtask web` 构建 feature 从 `web` 改成 `WEB_AUDIO_FEATURES = "web,ogg,mp3,wav,midi"`。四份 fixture 已进 `web/assets/manifest.txt`。
-- 验收（整段）：mixer 单测 + Win/Chrome 听测 → 提交 `P6 audio+ogg/mp3/wav+midi`。落地说明见 `docs/audio.md`（四层与 feature 边界、通道模型与循环默认值、三个容器三种循环点读法、native 主线程混音 + SPSC 环、MIDI 三档兜底、能力/平台矩阵、两个真坑）+ `docs/audio-web.md`（worklet 与 ScriptProcessor 的语义差、延迟口径、手测步骤与实测表）。→ `cargo test -p sisf-audio --all-features` **33 绿**（mixer 19 + bus 8 + pump_native 6）+ `cargo test -p sisf-media --all-features` 音频侧 21（2 项要 `SISF_SF2`）+ `cargo test --workspace --all-features` **176 绿 0 红** + `cargo xtask check-all` 四组 0 warning + `cargo xtask clippy`（win + wasm，`-D warnings`）+ `cargo xtask fmt --check` 净 + Windows 真设备有界复跑（上面第 4 条那行）。⚠️ 整段验收还差**人工两听**：Win 长时间播放 + 插拔耳机；Chrome-wasm 播 BGM/SE。
+- 验收（整段）：mixer 单测 + Win/Chrome 听测 → 提交 `P6 audio+ogg/mp3/wav+midi`。落地说明见 `docs/audio.md`（四层与 feature 边界、通道模型与循环默认值、三个容器三种循环点读法、native 主线程混音 + SPSC 环、MIDI 三档兜底、能力/平台矩阵、两个真坑）+ `docs/audio-web.md`（worklet 与 ScriptProcessor 的语义差、深度记账与帧率阈值两节、延迟口径、手测步骤与实测表）。→ 已提交 **`3ef3c66`**：`cargo test -p sisf-audio --all-features` **34 绿**（mixer 19 + bus 8 + pump_native 7）+ `cargo test --workspace --all-features` 全绿 0 红（2 项 `SISF_SF2` ignored）+ `cargo xtask check-all` 四组 0 warning + `cargo xtask clippy`（win + wasm，`-D warnings`）+ `cargo xtask fmt --check` 净 + `node --check` 与上面那条 node 侧契约测试 + Windows 真设备有界复跑（第 4 条那行）。⚠️ 整段验收还差**人工两听**：Win 插拔耳机/切默认端点；Chrome-wasm 修账后的复验读数。
 
 ### T7 期间发现并修正的事实（供后续阶段引用）
 1. **`sisf/{ogg,mp3,wav,midi}` 必须同时转发 `sisf-media/*` 与 `sisf-audio/*`**。第一版只转给 media，
@@ -230,11 +237,27 @@
     又是 `this.consumed += n`（取不到数据的静音帧也计）⇒ 上下文刚 running 时深度直接做负。
     浏览器上看到的形态很骗人：`underrun` 冻结在启动值、`buffered` 忽 0 忽 -1024，而**真实排队长度一路
     涨**（延迟跟着涨，闭环永不收敛）。改成只留 `workerPending` 一个在途量 + 处理器分开报 `played`
-    （真取走的帧）和 `silent`（只进 underrun），并在 `silent >= 512` 时也回报一次，免得全静音期间
-    主线程收不到任何消息。这类账 Rust 单测碰不到，只能靠控制台那行 `buffered=`/`underrun=` 复验。
-13. **`WORKLET_SRC` 是模板字符串 ⇒ 注释里不能写反引号**。修账时随手写的 `` `played - acked` `` 当场
-    截断了模板，JS 语法直接坏掉而 cargo 一侧毫无感觉（胶水不参与编译检查）。防线：
-    `node --check crates/sisf-audio/src/audio_pump.js`（几毫秒，能抓住模板截断/引号失衡）。
+    （真取走的帧）和 `silent`（只进 underrun）。回报节奏也一起改：原以为"攒够 512 帧再报一次"能省
+    消息，实际**回报间隔 = 主线程看到的深度的陈旧上界**（`workerPending` 只在收到回报时才降），
+    512 帧虚高正好吃掉需求闭环那 1/4 余量，60fps 下仍欠载 ⇒ 改成每个 quant 都报（48k 下 375 条/秒、
+    每条三个小整数），取不到数据的纯静音期也必须报（`frames: 0` 是有效回报）。
+    这类账 Rust 单测碰不到、只能靠浏览器控制台又太慢，落地成 node 侧的契约测试：
+    `crates/sisf-audio/tests/pump_bookkeeping.mjs` 直接 import 真胶水 + 真 `WORKLET_SRC`，stub 掉
+    WebAudio，在 48k 虚拟时间线上跑 60/50/42/30/20fps，断言"报出去的深度 == 真实排队（±1 quant）"、
+    非负、预热 1s 后 underrun 不再涨。跑法：`node crates/sisf-audio/tests/pump_bookkeeping.mjs`。
+13. **`WORKLET_SRC` 是模板字符串 ⇒ 里面（含注释）不能出现反引号**。修账时随手写的注释两次截断了模
+    板（`` `played - acked` ``、`` `workerPending` ``），JS 语法当场坏掉，而 cargo 一侧毫无感觉 ——
+    胶水文件不参与编译检查。防线：`node --check crates/sisf-audio/src/audio_pump.js`（几毫秒，抓住模板
+    截断/引号失衡），上面那个 `.mjs` 契约测试顺带也起同样作用（它要能把文件 import 进来）。
+14. **需求闭环的阈值不能只写"补到目标深度"**。第一版 `framesNeeded = TARGET - buffered`，于是每个 rAF
+    至多送 `TARGET` 帧，而这一帧本身要播掉 `rate/fps` 帧 ⇒ 主线程慢于 `rate/TARGET ≈ 47fps`（48k 下）
+    就**结构性欠载**，与是否有 bug 无关，只是账没算够。改成
+    `target = max(TARGET_FRAMES, 这一帧要播掉的量 + 1/4)`，再被环容量夹住；native 侧同一个道理同一个式子
+    （`pump_native.rs::refill_samples(taken, capacity)`，`[GAME][AUDIO]` 那行日志两平台对齐）。两个坑
+    记在 `docs/audio-web.md`：① 这个增量必须**在一个 tick 内保持一致**（先按"上次报的量"算，若只让第一
+    次调用看得见就会退化成每 rAF 只补 256 帧的一个 block，实测 `want=2048 pushed=1024` 仍欠载），所以
+    JS 里存了 `catchUpFrames`；② 判据用 `refill_samples(2286, cap) > 2286` 这种"一帧 30fps 也补得回来"
+    的形状断言，别只断"等于 TARGET"。
 
 
 ## T8 动画 + MoveRoute + 固定 tick
