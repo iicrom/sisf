@@ -176,4 +176,32 @@ cargo run --release -p sisf --example sprite_bench -- 240 100000
 http://127.0.0.1:8080/?ex=sprite_bench&wgl&sprites=20000
 ```
 
-实测：（待人工/浏览器复验后填写）
+实测：（2026-09-24 人工复验通过，内置浏览器 + `?wgl`）
+
+```
+[sprite_bench] 启动 sprites=20000 limit=0 图源=["img_64x48.png", "img_80x60.jpg", "img_40x40.webp", "img_24x18_24bpp.bmp"]
+[sisf-app] adapter: ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11) (Other, Gl)
+[sprite_bench] 第 4 帧: 图源 4/4 就绪（页=1）
+[sprite_bench] 合批断言通过: 4 张图源铺在 1 页图集上，20000 个实例只有 batch=2
+[sprite_bench] 周期 帧 60 544x416 sprites=20000 图源 4/4 页=1 batch=2 slot=1 inst=20000 期望 batch=Some(2) 帧时间 avg=56.39ms(17.7fps) min=41.60 max=613.60 累计掉帧(>20ms)=56
+[sprite_bench] 周期 帧 120 ... avg=44.23ms(22.6fps)
+[sprite_bench] 周期 帧 180 ... avg=43.12ms(23.2fps)
+[sprite_bench] 周期 帧 240 ... avg=43.03ms(23.2fps)
+[sprite_bench] 周期 帧 300 ... avg=49.37ms(20.3fps)
+[sprite_bench] 周期 帧 360 ... avg=46.54ms(21.5fps)
+[sprite_bench] 周期 帧 420 ... avg=48.86ms(20.5fps)
+```
+
+- **T4 的合批断言在 wasm 上同样成立**：`第 4 帧: 图源 4/4 就绪（页=1）` 说明
+  `WebManifest` 预取 → `Vfs::read` → `WasmTasks` 就地泵 → 装箱 → `UploadRing` 上传
+  整条链在浏览器里跑通，且四张不同格式的图确实落在同一页；canvas 上是 2 万个带纹理、
+  旋转、10% additive 的 sprite（截图复核），不是 T3 的纯色 quad。
+- 43–49ms/帧仍是环境限制而非引擎性能：GL 后端是 `Microsoft Basic Render Driver`
+  （软件光栅化）+ `xtask web` 的 debug 构建。同一环境 T3 的 20k 是 71.08ms，
+  T4 约 44ms，快下来的部分与桌面同源（1 页纹理 + 单槽，`batch 3→2`）。
+- 第 60 帧周期里的 `max=613.60ms` 是首帧段：wasm 下 23MB 模块的实例化与头几帧的
+  fetch/解码都算在里面（`record` 已剔除"图源未齐"的帧，但第 4 帧齐了之后仍有
+  一次页纹理创建 + 上传的尖峰）。
+- 顺带修掉一个"看不见即没发生"的坑：`println!` 在 wasm32-unknown-unknown 上是
+  **静默丢弃**，T3 示例里手写的 `console::log_1` 在 T4 重写时被丢掉，导致页面只剩
+  sisf-app 自己那行 adapter 日志。现在示例统一走 `platform::log_info`（见 todo T4 事实 9）。
