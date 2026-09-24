@@ -7,3 +7,16 @@ description = "VFS 资源虚拟文件系统 + AssetStore 缓存 + TaskRunner 异
 
 [dependencies]
 sisf-media.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = { workspace = true, optional = true }
+js-sys = { workspace = true, optional = true }
+web-sys = { workspace = true, optional = true, features = ["Response"] }
+
+[features]
+# 图像资源解码转发（sisf-media/image）；AssetStore 本身与格式无关
+image = ["sisf-media/image"]
+# GIF 多帧解码（T4 media 层，T8 接 AnimDef 驱动）
+gif = ["sisf-media/gif"]
+# wasm：预置清单 + fetch 的 VFS provider
+web = ["dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys"]

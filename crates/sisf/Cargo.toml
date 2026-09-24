@@ -18,10 +18,14 @@ sisf-rpgmk = { workspace = true, optional = true }
 
 [features]
 default = ["native"]
-# 启用：sisf-app/native（winit 桌面+Android 窗口；T7 cpal、T9 gilrs 挂这里）
-native = ["sisf-app/native"]
-# 启用：sisf-app/web（wasm-bindgen + WebAudio(T7) + fetch VFS(T4)）
-web = ["sisf-app/web"]
+# 启用：sisf-app/native（winit 桌面+Android 窗口；T7 cpal、T9 gilrs 挂这里）+ 图像解码
+native = ["sisf-app/native", "image"]
+# 启用：sisf-app/web（wasm-bindgen + WebAudio(T7) + fetch VFS(T4)）+ 图像解码
+web = ["sisf-app/web", "sisf-asset/web", "image"]
+# 启用：图像解码链（sisf-media/{png,jpeg-decoder,image-webp} + 手写 BMP）与图集/上传（T4）
+image = ["dep:sisf-media", "sisf-media/image", "sisf-asset/image", "sisf-render/image"]
+# 启用：sisf-media/gif → gif crate，多帧→AnimDef（T4）
+gif = ["dep:sisf-media", "sisf-media/gif", "sisf-asset/gif"]
 # 启用：sisf-media/ogg → symphonia ogg+vorbis（T7）
 ogg = ["dep:sisf-media", "sisf-media/ogg"]
 # 启用：sisf-media/mp3 → symphonia mp3（T7）
@@ -32,8 +36,6 @@ wav = ["dep:sisf-media", "sisf-media/wav"]
 midi = ["dep:sisf-media", "sisf-media/midi"]
 # 启用：sisf-media/video → native ffmpeg-next / web video 胶水（T11 桩）
 video = ["dep:sisf-media", "sisf-media/video"]
-# 启用：sisf-media/gif → gif crate，多帧→AnimDef（T4）
-gif = ["dep:sisf-media", "sisf-media/gif"]
 # 启用：sisf-app/inspector → egui 调试面板（T12）
 inspector = ["sisf-app/inspector"]
 # 启用：sisf-rpgmk 兼容层（T11）

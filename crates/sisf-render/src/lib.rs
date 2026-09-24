@@ -4,10 +4,17 @@
 //! `end_frame()` 排序分组、写环形缓冲、单个 render pass 逐批 draw。
 //! 纯逻辑部分（`vertex`/`batch`/`ring`）不碰 GPU 句柄，三端含 wasm 都能跑单测。
 
+pub mod atlas;
+#[cfg(feature = "image")]
+pub mod atlas_gpu;
 pub mod batch;
 pub mod renderer;
 pub mod ring;
 pub mod vertex;
+
+pub use atlas::{AtlasLayout, LARGE_EPOCH, LayoutError, LayoutEvent, Region};
+#[cfg(feature = "image")]
+pub use atlas_gpu::{Atlas, AtlasPages, AtlasShared, Bitmap, UploadRing};
 
 pub use batch::{Batch, BatchKey, BatchList, Blend};
 pub use renderer::{DrawStats, FrameStatus, Renderer, RendererError, Rgba, WHITE_EPOCH};

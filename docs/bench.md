@@ -1,4 +1,4 @@
-# 批量 quad 渲染器压测（T3）
+# T3：批量 quad 渲染器压测
 
 被测对象：`examples/sprite_bench.rs`。640×480 虚拟分辨率 + `ScaleMode::Fill`（虚拟像素≈物理像素），
 精灵尺寸 6–34px 随机、颜色/透明度随机、10% additive、位置与旋转每帧按随机速度积分推进，
@@ -95,3 +95,76 @@ canvas 上确实是 2 万个旋转、加色的 quad（截图复核通过）。
   回归验证：`http://127.0.0.1:8080/?wgl`（缺省 `ex=hello_window`）连跑 2400+ tick，
   控制台打出 `tick 600 dt 10.9ms / tick 1200 dt 13.3ms / tick 1800 dt 8ms / tick 2400 dt 5.4ms`，
   即 T2 的 wasm 帧循环此前从未真正跑到过出帧那一步。
+
+# T4：VFS + 图集 + 混合图源
+
+被测对象仍是 `examples/sprite_bench.rs`，但图源换成一整条真实链路：
+
+```
+Vfs(DirProvider / WebManifest) → AssetStore<Bitmap>::load → worker 解码（按魔数分派）
+  → Atlas::new_bitmap 装箱（epoch = 页代号） → 主线程 UploadRing（256 行对齐 + 一次 submit）
+  → 精灵按 uv_rect 子矩形采样
+```
+
+图源是四个不同魔数的 fixture：`img_64x48.png` / `img_80x60.jpg` / `img_40x40.webp` /
+`img_24x18_24bpp.bmp`。四张图的边长都 ≤ 256，因此全部落进**同一个 256² 页桶**——
+这正是"纹理切换次数与图源数量无关"的直接体现。
+
+示例内断言（跑不到"合批断言通过"就算失败）：
+
+```
+batches == 用到的页数 × blend 种数        且 instances == sprite 数，slot == 1
+```
+
+`slot == 1` 是 `draw` 里 `set_quads_per_slot(sprite 数)` 的结果：把环形槽容量抬到整帧
+用量，才排除掉 T3 那个"跨槽断批"的干扰项，让 batch 数纯粹反映合批质量。
+
+## 桌面（RTX 2080 Ti / Vulkan，release）
+
+命令同 T3（`<帧数> <sprite 数>`），统计口径不变，且额外剔除图源未齐的帧。
+
+```sh
+cargo run --release -p sisf --example sprite_bench -- 240 100000
+```
+
+实测（每行一次 `RESULT`，240 帧；四种格式混涂，10% additive）：
+
+| sprites | 平均帧时间 | FPS | min–max | 掉帧(>20ms) | 页 | batch | slot |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 10 000 | 0.88 ms | 1139.4 | 0.83–1.35 | 0 | 1 | 2 | 1 |
+| 50 000 | 5.06 ms | 197.5 | 4.72–5.73 | 0 | 1 | 2 | 1 |
+| **100 000** | **11.93 ms** | **83.8** | 10.77–17.25 | 0 | 1 | 2 | 1 |
+| 250 000 | 34.30 ms | 29.2 | 29.54–40.57 | 238/240 | 1 | 2 | 1 |
+| 500 000 | 76.19 ms | 13.1 | 65.28–83.72 | 238/240 | 1 | 2 | 1 |
+
+100 000 精灵原始输出：
+
+```
+[sprite_bench] 启动 sprites=100000 limit=240 图源=["img_64x48.png", "img_80x60.jpg", "img_40x40.webp", "img_24x18_24bpp.bmp"]
+[sisf-app] adapter: NVIDIA GeForce RTX 2080 Ti (DiscreteGpu, Vulkan)
+[sprite_bench] 合批断言通过: 4 张图源铺在 1 页图集上，100000 个实例只有 batch=2
+[sprite_bench] RESULT 帧 240 800x600 sprites=100000 图源 4/4 页=1 batch=2 slot=1 inst=100000 期望 batch=Some(2) 帧时间 avg=11.93ms(83.8fps) min=10.77 max=17.25 累计掉帧(>20ms)=0
+```
+
+结论：
+
+- **T4 的合批断言成立**：4 个图源、2 种 blend → 10 万实例 2 个 batch。与 T3 白图基线
+  （13.27ms/75.4fps，`batch=3 slot=2`）相比 100k 快约 11%，来自真图纹理（1 页）与
+  单槽带来的少一次换缓冲，**图集本身没有变成开销**。
+- 帧时间仍随精灵数线性（0.88→5.06→11.93→34.30→76.19ms），即仍是填充率瓶颈；
+  25 万以上超 vsync 属预期。
+- 上传侧在本例里只发生一次：四张图共约 15KB 像素，`UploadRing` 之后 CPU 像素立即释放。
+  真正需要关注的是"每帧大量新位图落地"的场景（首屏/切图），届时几何增长的 staging
+  缓冲会一次扩到位。
+
+## wasm（`cargo xtask web sprite_bench`）
+
+图源放在 `web/assets/`（四个 fixture 的副本 + `manifest.txt`）；`WebManifest` 只登记
+"清单里有这些路径"，字节由宿主 `fetch` 预取后 `insert` 灌回，因此 `VfsProvider::read`
+仍然是同步接口。浏览器访问：
+
+```
+http://127.0.0.1:8080/?ex=sprite_bench&wgl&sprites=20000
+```
+
+实测：（待人工/浏览器复验后填写）

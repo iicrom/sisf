@@ -1,0 +1,4 @@
+img_64x48.png
+img_80x60.jpg
+img_40x40.webp
+img_24x18_24bpp.bmp

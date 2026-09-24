@@ -10,8 +10,12 @@ sisf-asset.workspace = true
 wgpu.workspace = true
 bytemuck.workspace = true
 thiserror.workspace = true
+rect_packer.workspace = true
 
 [features]
+default = ["image"]
+# 图集 + 图像上传（T4）。关掉只剩纯色 quad 通路。
+image = ["sisf-asset/image"]
 debug_lines = []
 
 [dev-dependencies]

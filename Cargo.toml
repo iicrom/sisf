@@ -25,8 +25,13 @@ sisf = { path = "crates/sisf" }
 wgpu = { version = "30.0.1", features = ["webgl"] }
 winit = "0.30.13"
 bytemuck = { version = "1.25.2", features = ["derive"] }
-rect-packer = "0.2.1"
+rect_packer = "0.2.1"
 etagere = "0.3.0"
+png = "0.18.1"
+jpeg-decoder = "0.3.2"
+image-webp = "0.2.4"
+gif = "0.14.2"
+turbojpeg = "1.5.1"
 serde = { version = "1.0.229", features = ["derive"] }
 ron = "0.12.2"
 thiserror = "2"
@@ -43,6 +48,7 @@ web-sys = { version = "0.3", features = [
     "Element",
     "EventTarget",
     "Performance",
+    "Response",
     "console",
 ] }
 js-sys = "0.3"

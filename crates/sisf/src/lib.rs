@@ -12,6 +12,7 @@ pub use sisf_asset as asset;
 pub use sisf_audio as audio;
 pub use sisf_event as event;
 #[cfg(any(
+    feature = "image",
     feature = "ogg",
     feature = "mp3",
     feature = "wav",

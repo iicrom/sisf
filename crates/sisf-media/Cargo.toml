@@ -6,13 +6,25 @@ license.workspace = true
 description = "图像/音频/MIDI/视频等媒体解码（平台门控依赖集中处）"
 
 [dependencies]
+thiserror.workspace = true
+png = { workspace = true, optional = true }
+jpeg-decoder = { workspace = true, optional = true }
+image-webp = { workspace = true, optional = true }
+gif = { workspace = true, optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+turbojpeg = { workspace = true, optional = true }
 
 [features]
-# 占位 feature：对应解码依赖在 T4（图像/GIF）、T7（音频/MIDI）、T11（视频）阶段接线
+# 图像解码（T4）：png + jpeg-decoder + image-webp；BMP 手写无依赖
+image = ["dep:png", "dep:jpeg-decoder", "dep:image-webp"]
+# 启用：sisf-media/gif → gif crate，多帧→AnimDef（T4）
+gif = ["dep:gif"]
+# 启用：jpeg 解码换 turbojpeg（native only，T4；wasm target 上该包不可见）
+simd-jpeg = ["image", "dep:turbojpeg"]
+# 占位 feature：对应解码依赖在 T7（音频/MIDI）、T11（视频）阶段接线
 ogg = []
 mp3 = []
 wav = []
 midi = []
 video = []
-gif = []
-simd-jpeg = []
