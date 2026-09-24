@@ -1820,7 +1820,10 @@ dependencies = [
 name = "sisf-sprite"
 version = "0.1.0"
 dependencies = [
+ "png",
+ "pollster",
  "sisf-render",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

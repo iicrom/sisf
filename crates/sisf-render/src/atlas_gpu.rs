@@ -317,6 +317,18 @@ impl Clone for Bitmap {
     }
 }
 
+/// 手写而不是 derive：`staging` 是几十 KB 的像素，打出来只会淹掉日志。
+impl std::fmt::Debug for Bitmap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Bitmap")
+            .field("epoch", &self.inner.epoch)
+            .field("rect", &self.inner.rect)
+            .field("page_size", &self.inner.page_size)
+            .field("pending", &self.is_pending())
+            .finish()
+    }
+}
+
 impl Drop for BitmapInner {
     fn drop(&mut self) {
         if let Some(shared) = self.shared.upgrade() {

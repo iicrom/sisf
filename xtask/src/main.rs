@@ -5,7 +5,7 @@
 //! - `fmt`        `cargo fmt --all`（附加 `--check` 透传）
 //! - `clippy`     workspace clippy（win + wasm，`-D warnings`）
 //! - `web`        构建 wasm 示例（`cargo xtask web [示例名]`，缺省 `hello_window`）+ wasm-bindgen + 本地静态服务
-//! - `golden`     离屏 golden 测试（T5 实装）
+//! - `golden`     离屏 sprite golden 比对（`cargo xtask golden [--bless]`，仅本机 Windows 生效）
 //! - `wasm-test`  wasm-pack 浏览器测试（T12 实装）
 //! - `android`    cargo-ndk 构建 + adb 安装（T12 实装）
 
@@ -32,7 +32,7 @@ fn main() {
         ),
         "clippy" => clippy(),
         "web" => web(rest.first().map(String::as_str).unwrap_or("hello_window")),
-        "golden" => not_implemented("golden", "T5"),
+        "golden" => golden(rest),
         "wasm-test" => not_implemented("wasm-test", "T12"),
         "android" => not_implemented("android", "T12"),
         _ => usage(),
@@ -72,6 +72,41 @@ fn check(cmd: &[&str]) -> i32 {
     println!("==> cargo {}", cmd.join(" "));
     let status = Command::new("cargo")
         .args(cmd)
+        .status()
+        .unwrap_or_else(|e| panic!("无法启动 cargo: {e}"));
+    status.code().unwrap_or(1)
+}
+
+/// 离屏 golden：跑 `sisf-sprite` 的 golden 场景，与 `tests/golden/` 基线逐通道比对。
+/// `--bless` 刷新基线（首次落图也用这个）。
+///
+/// 该测试整个 `#![cfg(windows)]`：wgpu 30 没有软件光栅后端，离屏同样要真 adapter，
+/// 所以在其它平台会编译成 0 个用例并通过 —— 只有本机有 DX12/Vulkan 时才是真比对。
+fn golden(rest: &[String]) -> i32 {
+    let mut bless = false;
+    for arg in rest {
+        match arg.as_str() {
+            "--bless" => bless = true,
+            other => {
+                eprintln!("未知参数 `{other}`；用法: cargo xtask golden [--bless]");
+                return 2;
+            }
+        }
+    }
+    println!(
+        "==> cargo test -p sisf-sprite --test golden_sprite{}",
+        if bless {
+            "  (bless：重写基线)"
+        } else {
+            ""
+        }
+    );
+    let mut cmd = Command::new("cargo");
+    cmd.args(["test", "-p", "sisf-sprite", "--test", "golden_sprite"]);
+    if bless {
+        cmd.env("SISF_GOLDEN", "bless");
+    }
+    let status = cmd
         .status()
         .unwrap_or_else(|e| panic!("无法启动 cargo: {e}"));
     status.code().unwrap_or(1)

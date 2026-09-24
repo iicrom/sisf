@@ -7,3 +7,9 @@ description = "Sprite arena：变换/混合/tone/排序/动画状态"
 
 [dependencies]
 sisf-render.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# golden 测试自己写 PNG（不引 `image`，够用即可）。
+png.workspace = true
+pollster.workspace = true

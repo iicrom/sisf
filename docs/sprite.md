@@ -1,0 +1,111 @@
+# T5：sprite 语义与能力矩阵
+
+`crates/sisf-sprite` 只做一件事：把"引擎语义"的可视单元（RPG Maker 式 `Sprite`）翻译成
+渲染器的 `(BatchKey, Instance)`。数据在 `sprite.rs`、存放在 `arena.rs`、翻译在 `draw.rs`，
+语义只落码在 `draw.rs` 一处，所以它的单测就是这条通路的定义。
+
+```
+SpriteArena ──collect(ViewportRef)──▶ BatchList<Instance> ──append_list──▶ Renderer::end_frame
+   (槽+代号)        过滤/排序/uv          (layer,epoch,blend,z,insertion)     分批 + 两条管线
+```
+
+## 能力矩阵
+
+| 能力 | 本阶段 | 说明 |
+| --- | --- | --- |
+| `Tone::Offset{rgb,gray}` | ✅ | 着色器一条通路：`rgb` 是各通道加法偏移（[-1,1]），`gray` 是与自身亮度的混合比 |
+| `Tone::Matrix([f32;20])` | ❌ 显式报错 | 采集时返回 `CollectError::UnsupportedTone{sprite}`，指认元凶句柄；不静默当无效果（DoD-4） |
+| `Blend::Normal`（预乘 alpha-over） | ✅ | 管线 1 |
+| `Blend::Add` | ✅ | 管线 2 |
+| `Multiply` / `Screen` | ⏸ 不引入 | `BlendMode = sisf_render::Blend`，与其放一个映射不到的变体，不如等 T12 一起收口（加 pipeline 或删 RGSS 语义） |
+| anchor / flip_x / flip_y / rotation / scale | ✅ | 见下 |
+| `src` 子矩形 + 越界裁剪 | ✅ | 裁进位图，不拉伸回来 |
+| 多 viewport / 多 layer | ✅ | `Layer(u8)` + `ViewportRef`，同一 arena 可被多个可视口各采一次 |
+| 动画（`AnimDef` / MoveRoute） | ⏸ T8 | `Sprite` 里没有 `anim` 字段，见文末"T5 与清单的差" |
+| 位图渲染目标作源（`Sprite::bitmap` 是 RT） | ⏸ T6 | 采集端已与来源解耦（只要 `Bitmap` 有 epoch + 页内 rect） |
+
+## 语义
+
+**锚点同时是 `pos` 的对齐点和 `rotation` 的轴心。** 着色器只认"实例中心"这一个枢轴
+（`shaders/sprite.wgsl` 里 `half = (corner-0.5)*abs(size)`，`mirror=sign(size)` 在旋转之后施加），
+所以 CPU 侧先把"锚点 → 矩形中心"的偏移按 `rotation` 转一遍再加到 `pos` 上：
+`center = pos + R(rot) · ((0.5-anchor)·|size|)`。差一个符号就是"绕中心转但锚点跑到别处"，
+单测 `rotation_pivots_on_anchor` 钉住锚点到中心的距离在旋转后不变。
+
+**翻转是 `size` 的符号**，不是交换 uv（T3 决定）。`flip_x/flip_y` 与可为负的 `scale` 叠加，
+`uv0/uv1` 恒保持递增。
+
+**顺序**：提交给 `BatchList` 的是 `(layer, epoch, blend, z, insertion)`，排序后先按
+layer、再按图集页、再按 blend 分批次，`z` 只在同批次内决定先后，`z` 相同保槽序。
+换句话说 `z` **不能**跨页或跨 blend 改变覆盖关系——这是合批的代价，跟 RPG Maker 的
+"viewport 内 z 全序"略有出入，需要严格跨页 z 时要显式分帧画。
+
+**`src` 越界裁进位图**（`place`）：裁掉的那部分连同它的目的像素一起消失，剩下的保持
+"1 源像素 → `scale` 目的像素"，而不是把窄条拉伸回原尺寸。零尺寸、`src` 与位图无交集、
+`!visible`、`opacity<=0` 都在采集时跳过（不产出实例）。
+
+**无位图 = 内置 1×1 白图**（`WHITE_EPOCH`）：`Sprite::solid(size)` 画纯色矩形，此时只有
+`src.w/h` 有意义且直接就是目的尺寸（虚拟像素）。T7 之前的占位/调试绘制走这条路。
+
+**采集是全成败的**：`collect` 先在临时 `Vec` 里攒完再提交，遇到 `Matrix` tone 报错时不会
+留下半批实例（`insertion` 由 `push` 填，半途提交会让序号与实例对不上）。
+
+## 多 viewport
+
+`ViewportRef{layer, tag}`：`layer` 是投影栈层（0..7，写进 `BatchKey::layer` 与实例的投影索引，
+必须是同一个数），`tag` 是归属过滤（`Some(t)` 只收 `Sprite::layer == t`）。
+`ViewportRef::new(Layer(2))` 画第二层的精灵，`ViewportRef::all(Layer(1))` 把整个集合重画进
+另一层（小地图/镜像视口用它）。同一个 arena 被两个可视口各采一次、产物 `append` 进同一张
+`BatchList`，两次的输出互不影响 —— 断言见 `two_viewports_collect_the_same_arena_independently`
+与 golden 里的 `Layer(2)` 格。
+
+`Layer` 一个类型同时当"精灵归属标签"和"投影栈层"用：RPG Maker 里这两个概念本来就是绑定的
+（精灵属于哪个 viewport 就用哪个 viewport 的投影），拆成两个类型只会让它们失同步。
+
+## golden
+
+`crates/sisf-sprite/tests/golden_sprite.rs`，`cargo xtask golden`（`--bless` 重写基线）。
+离屏 544×416 + `COPY_DST` 读回，真 adapter（Vulkan/DX12），64×64 单元格 5 列 × 4 行，
+源图是 8×8 的四象限标记图（左上红 / 右上绿 / 左下蓝 / 右下白，预乘 RGBA8）：
+
+| 格 | 用例 | 断言 |
+| --- | --- | --- |
+| 1 行 | 基准 / `flip_x` / `flip_y` / `anchor(0.5,1)` / `visible=false` | 象限置换表；锚点格与基准格逐点全等；不可见格仍是清屏黑 |
+| 2 行 | `opacity=0.5` / `Tone::offset([0,0.5,0])` / `gray=1.0` / `rotation=90°` | 0.5 线性白 → sRGB 188；红 +0.5 绿 → G≈188、R 饱和；红灰度化 → 亮度 0.2126 → 127；90° 象限置换 `[BLUE,RED,WHITE,GREEN]` |
+| 3 行 | additive 对 / alpha-over 对 / z 序 / `src` 越界 | 0.5+0.5 → 1.0（饱和）；0.5 over 0.5 → 0.75 线性（225）；`z=5` 的红盖住 `z=-5` 的绿；越界只剩 2×2 源像素 → 32×32 目的像素，被裁的一半不出现 |
+| 4 行 | `Layer(2)` 经第二个 `ViewportRef` 采集 | 同一帧里第二层格完整出图 |
+
+断言分两层：**语义断言**独立于基线文件，写反翻转/锚点/z 序时直接指出是哪一条；
+**基线比对**逐通道 `TOL=1` 字节（sRGB 编解码往返本身就有 ±1 量化抖动）。
+两条都跑在同一批读回像素上。bless 之后再跑一次比对结果一致 ⇒ 该场景在这台机器上可复现。
+
+⚠️ 整个测试文件是 `#![cfg(windows)]`：wgpu 30 没有软件光栅后端，离屏渲染同样要可用 adapter，
+CI 里若没有 GPU 就会拿不到 adapter。跨平台的无窗口冒烟由 `crates/sisf-render/tests/readback.rs`
+（清屏读回）负责。非 Windows 上 `cargo xtask golden` 编译成 0 个用例并通过，不代表像素验证过。
+
+采样点一律取在象限/单元格中心，见下。
+
+## 已知缺陷：图集 `src` 边界的半纹素渗色
+
+页纹理采样器是 `Linear` + `ClampToEdge`，装箱时子矩形之间没有留 gutter。于是放大绘制某个
+`src` 子矩形时，边界最后半个纹素会采到隔壁像素（页上相邻的那张图），基线图里能看到一圈
+1–2px 的色边。影响面：所有"从共享页里取子矩形 + `scale>1`"的绘制。
+
+绕法（当前）：golden 与断言只在格心/象限中心取点。**修法**（后续阶段）：装箱时每单四周留
+1px 复制边（inset gutter），或给 `Bitmap` 一个 `filter: Linear|Nearest` 选项并按需建两个
+sampler。归到 T6（`Bitmap` 渲染目标与子图集一并处理）。
+
+## T5 与清单的差
+
+1. **`Sprite` 没有 `anim` 字段**。`AnimDef`/`AnimState`/步帧是 T8 的整套机制，提前塞一个
+   `Option<AnimDef>` 只会让 T8 重新设计它；现在把"当前帧 → `src`"的决定留在调用方。
+2. **`BlendMode` 是类型别名**（`= sisf_render::Blend`）而不是新枚举 —— 变体必须与管线一一对应，
+   多出来的 `Multiply/Screen` 无处可去。
+3. **代号字段叫 `generation` 不叫 `gen`**：edition 2024 把 `gen` 列为保留关键字，
+   `SpriteArena{slots, free, generation}` 与 `SpriteRef::generation()` 都受影响（17 处编译错误换来的教训）。
+4. **golden 落在 crate 内**（`crates/sisf-sprite/tests/golden/sprite_scene.png`），不是仓库根
+   `tests/golden/`：基线图跟着被测 crate 走，`env!("CARGO_MANIFEST_DIR")` 定位，多 crate 加 golden 时不必再约定根目录子结构。
+5. 为了离屏读回，`sisf-render` 新增 `Renderer::new_offscreen` / `Target::Offscreen` /
+   `FrameStatus::Rendered` / `Renderer::readback` / `Renderer::apply_atlas`；`Bitmap` 补了手写
+   `Debug`（`Sprite` 要 `derive(Debug)`，而 `Bitmap` 内部是 `Arc` 到 GPU 资源，自动派生没意义）。
+   `png` / `pollster` 是 `sisf-sprite` 的 dev-dependencies，不进运行时依赖面。

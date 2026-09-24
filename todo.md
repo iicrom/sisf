@@ -79,13 +79,49 @@
 11. **压测读数有两个陷阱**：present 节奏给了约 6ms 的地板（10k/50k 两档读到的是它，不是引擎成本；窗口被遮挡时地板消失，会读出 0.88ms/1139fps 这种数）；100k 恰好落在 vsync 边界附近，跨 run 抖动 11.9–14.2ms，需 300 帧复核。结论都记在 `docs/bench.md`。
 
 ## T5 Sprite arena + 变换 / blend / tone
-- [ ] `sisf-sprite/src/sprite.rs`：`Sprite{ bitmap, src, anchor, pos, scale, rotation, opacity, tone, flip_x, flip_y, z, visible, blend, anim }`；`Tone{Offset{rgb,gray}, Matrix([f32;20])}`；`BlendMode{Normal,Add,Multiply,Screen,None}`。验收：`Default` 与字段 setter 编译通过。
-- [ ] `arena.rs`：`SpriteArena{ slots, free:Vec<u32>, gen:u32 }` + `SpriteRef(u32,u32)` + `spawn/despawn/get/get_mut/iter_live`。验收：slot 复用后旧句柄因 generation 失效（单测）。
-- [ ] `draw.rs`：`collect(&self,&mut BatchList)` — 过滤不可见/全透明、按 `(layer,z)` 排序、`src`+atlas 合成 uv（含 flip）、rotation 入 instance。验收：anchor/flip/z 排序单测。
-- [ ] `Tone::Matrix` 本阶段明确标注不支持并返回错误（不写空实现分支）；`Multiply/Screen` 同 T12 决策。验收：文档 + 单测断言错误路径。
-- [ ] 多 viewport/layer：`Layer(u8)` + `ViewportRef`，同一 arena 可被两个 viewport 采集（RPG Maker 双层视口 / SLG 小地图）。验收：单测两 viewport 输出独立。
-- [ ] `tests/golden_sprite.rs`（`#[cfg(windows)]`）：离屏 544×416，DX12/Vulkan adapter + `COPY_DST` 读回，覆盖 opacity=0.5 / tone offset / gray / flip_x,y / anchor(0.5,1) / additive，逐通道容差 ≤1e-3。验收：`cargo xtask golden` 绿，图落 `tests/golden/`（首次 `--bless`）。
-- 验收（整段）：golden + arena 单测 → 提交 `P4 sprite arena+tone/blend`。
+- [x] `sisf-sprite/src/sprite.rs`：`Sprite{ bitmap, src, anchor, pos, scale, rotation, opacity, tone, flip_x, flip_y, z, visible, blend, anim }`；`Tone{Offset{rgb,gray}, Matrix([f32;20])}`；`BlendMode{Normal,Add,Multiply,Screen,None}`。验收：`Default` 与字段 setter 编译通过。→ `sprite::tests::{default_is_opaque_visible_main_layer, fields_are_settable_in_place, matrix_tone_has_no_pipeline}` 绿。⚠️ 两处与清单字面不同，理由见本条末尾：`anim` 字段**未加**（整套动画是 T8 的机制，现在放 `Option<AnimDef>` 只会被 T8 重设计）；`BlendMode` 不是新枚举而是 `pub type BlendMode = sisf_render::Blend`（变体必须与 pipeline 一一对应，`Multiply/Screen` 无处可去，同下条 T12 决策）。
+- [x] `arena.rs`：`SpriteArena{ slots, free:Vec<u32>, gen:u32 }` + `SpriteRef(u32,u32)` + `spawn/despawn/get/get_mut/iter_live`。验收：slot 复用后旧句柄因 generation 失效（单测）。→ `arena::tests` 5 项绿，含 `reused_slot_invalidates_old_handle`（同槽不同代号 → 旧句柄 `get`/`get_mut`/`despawn` 全部无效，且写不到新精灵）、`stale_handle_cannot_despawn_new_sprite`、`free_list_recycles_before_growing`、`iter_live_skips_dead_slots_in_slot_order`。⚠️ 字段/方法名是 `generation` 不是 `gen`：edition 2024 把 `gen` 列为保留关键字。
+- [x] `draw.rs`：`collect(&self,&mut BatchList)` — 过滤不可见/全透明、按 `(layer,z)` 排序、`src`+atlas 合成 uv（含 flip）、rotation 入 instance。验收：anchor/flip/z 排序单测。→ `draw::tests` 10 项绿：`anchor_offsets_center_from_pos`、`rotation_pivots_on_anchor`（锚点到中心的距离旋转后不变）、`flip_signs_size_and_keeps_uv_ascending`、`uv_comes_from_src_inside_the_page_rect`、`src_out_of_bitmap_is_clipped_not_stretched`、`invisible_fully_transparent_and_zero_area_are_skipped`、`z_orders_within_a_batch_and_layer_splits_batches` 等。锚点要同时当 `pos` 对齐点和旋转轴心，而 shader 只认"实例中心"一个枢轴 ⇒ CPU 侧算 `center = pos + R(rot)·((0.5-anchor)·|size|)`。
+- [x] `Tone::Matrix` 本阶段明确标注不支持并返回错误（不写空实现分支）；`Multiply/Screen` 同 T12 决策。验收：文档 + 单测断言错误路径。→ `CollectError::UnsupportedTone{sprite: SpriteRef}`（带元凶句柄），`collect` 先在临时 `Vec` 攒完再提交 ⇒ 报错时不留半成品实例；单测 `tone_offset_maps_to_instance_and_matrix_errors` + `collect_reports_the_offending_handle`；文档 `docs/sprite.md` 的能力矩阵逐行标 ✅/❌/⏸（`Tone::Matrix` ❌ 报错、`Multiply/Screen` ⏸ 不引入变体、`Offset`/`Normal`/`Add` ✅）。
+- [x] 多 viewport/layer：`Layer(u8)` + `ViewportRef`，同一 arena 可被两个 viewport 采集（RPG Maker 双层视口 / SLG 小地图）。验收：单测两 viewport 输出独立。→ `draw::tests::two_viewports_collect_the_same_arena_independently` + golden 里 `Layer(2)` 格经第二个 `ViewportRef` 采进同一帧。`ViewportRef{layer, tag}`：`layer` 是投影栈层，`tag` 是归属过滤（`Some` 只收同标签、`all()` 重画整个集合给小地图）。`Layer` 一个类型同时当归属标签与投影层是刻意的（RPG Maker 里两者本就绑定，拆开只会失同步）。
+- [x] `tests/golden_sprite.rs`（`#[cfg(windows)]`）：离屏 544×416，DX12/Vulkan adapter + `COPY_DST` 读回，覆盖 opacity=0.5 / tone offset / gray / flip_x,y / anchor(0.5,1) / additive，逐通道容差 ≤1e-3。验收：`cargo xtask golden` 绿，图落 `tests/golden/`（首次 `--bless`）。→ 实现在 `crates/sisf-sprite/tests/golden_sprite.rs`（离屏 `Renderer::new_offscreen` + `readback`，15 个精灵 / 两个 `ViewportRef`）。语义断言是主证据（每条独立：翻转象限置换、`anchor(0.5,1)` 落点与左上锚点同格、`visible=false` 全黑、0.5 白读回 sRGB 188、tone offset G=188、红灰度化 0.2126→127、90° 象限置换 `[BLUE,RED,WHITE,GREEN]`、additive 0.5+0.5 饱和 vs over 0.5 双层 0.75、z=5 盖 z=-5、`src` 越界只剩 2×2 源像素→32×32 目的像素、layer 2 格），基线比对 `TOL=1` 字节/通道。`xtask golden` 由本阶段实装（`--bless` ⇒ `SISF_GOLDEN=bless`）：`cargo xtask golden` → `test sprite_scene_golden ... ok`（先 bless 再比对，两次结果一致 ⇒ 这台机器上可复现），基线 `crates/sisf-sprite/tests/golden/sprite_scene.png`。**注意**：wgpu 30 无软件光栅后端，整个文件 `#![cfg(windows)]`，非 Windows 上该 target 编译成 0 个用例并通过（跨平台无窗口冒烟由 `sisf-render/tests/readback.rs` 承担）。
+- 验收（整段）：golden + arena 单测 → 提交 `P4 sprite arena+tone/blend`。→ `cargo test --workspace --all-features` **84 绿 0 warning**（本阶段新增：`sisf-sprite` 18 单测 + golden 1 + lib doctest 1；其余为 asset 16 + app 6 + media 8 + render 32 + render 集成 1 + sisf doctest 1 —— 注：T4 那行记的 58 漏计了 `sisf-app` 的 6 项与 `sisf` doctest，实际当时就是 65）+ `cargo xtask golden` 绿 + `cargo xtask check-all` 三端 0 warning（`--all-features` / wasm32 `web` / aarch64-linux-android `native`）+ `cargo xtask clippy`（win + wasm，`-D warnings`）+ `cargo fmt --all --check` 净 + `docs/sprite.md`。
+
+### T5 期间发现并修正的事实（供后续阶段引用）
+1. **锚点当旋转轴心必须换算枢轴，不是"改锚点值就行"**：`shaders/sprite.wgsl` 的顶点式
+   `half=(corner-0.5)*abs(size)` + `mirror=sign(size)`（mirror 在旋转**之后**施加）意味着整块矩形
+   只绕实例 `pos` 转。要"绕锚点转"就得 CPU 侧算 `center = pos + R(rot)·((0.5-anchor)·|size_abs|)`；
+   直接改锚点会同时挪动落点。写反的后果是 `anchor=(0.5,1)` 的精灵转 90° 飞出原位。
+2. **`z` 不能跨图集页 / 跨 blend 改变覆盖关系**：合批键 `(layer, epoch, blend, z, insertion)` 里
+   `epoch`/`blend` 在 `z` 之前，所以"z=100 的精灵盖住 z=0 的"只在同页同 blend 内成立。
+   RPG Maker 是 viewport 内全序 ⇒ 需要严格跨页 z 时得显式分帧画或强制同页。T6 的 clip stack /
+   T8 的 `zorder` 语义都要以此为前提。
+3. **图集 `src` 边界有半纹素渗色**：页采样器是 `Linear`+`ClampToEdge`，装箱不给子矩形留 gutter，
+   于是放大取子矩形时边界最后半个纹素采到页上相邻图（bless 出的基线图上能看到 1–2px 色边）。
+   现在 golden 只在格心/象限中心取点绕开它；**修法是装箱留 1px inset 复制边或按 `Bitmap` 选
+   Linear/Nearest sampler**，归 T6（与位图渲染目标、子图集一起做）。任何人加"贴边采样"的
+   断言前都得先看这条。
+4. **`Tone::Matrix` 保持"报错"而不是"当无效果"**：后者会让 RGSS 移植层写出的调色代码静默失效、
+   排查成本极高。`Multiply/Screen` 同样不预先塞进 `Blend` 枚举 —— 加 pipeline 与删 RGSS 语义
+   这个二选一连同 `Matrix` 通路一起在 T12 收口。
+5. **`collect` 必须全成败**：`BatchList::push` 自己填 `insertion`，边报错边提交会留下序号与实例
+   对不上的半批。现在是先攒 `Vec` 再落盘。
+6. **`gen` 在 edition 2024 是保留关键字**：`SpriteArena{gen}` 与 `SpriteRef::gen()` 共 17 处编译错误，
+   统一改叫 `generation`。清单里凡写 `gen` 的地方都按此读。
+7. **离屏读回是 golden 的前置能力**，为 T5 补进 `sisf-render`：`Renderer::new_offscreen` +
+   `Target::Offscreen` + `FrameStatus::Rendered` + `readback()`（去掉 256 行对齐 padding 后返回
+   紧凑 RGBA8）+ `apply_atlas`。离屏纹理格式取 `Rgba8UnormSrgb`（与最常见 surface 一致 ⇒ 证明的是
+   同一条色彩通路）。`readback_clear` 现在建在同一条路上。
+8. **`Bitmap` 之前没有 `Debug`**，而 `Sprite` 要 `derive(Debug)`（golden 失败信息要用）：补了手写
+   `Debug`（epoch/rect/page_size/pending），不 `derive` 是因为内部 `Arc` 到 GPU 资源，自动派生打不出有用东西。
+9. **golden 基线落 crate 内**（`crates/sisf-sprite/tests/golden/`），不是清单写的仓库根 `tests/golden/`：
+   用 `env!("CARGO_MANIFEST_DIR")` 定位，多 crate 各有 golden 时不必再约定根目录子结构。
+   `png`/`pollster` 因此是 `sisf-sprite` 的 dev-dependencies（不进运行时依赖面）。
+10. **期望值要写成线性值再用逆 sRGB 换算**（`byte = 1.055·L^(1/2.4)-0.055`）：0.5→188、0.75→225、
+    0.2126→127。第一版把正向变换写反，读回全错。另外目标不透明时预乘混合后的 alpha 字节仍是 255，
+    不是 128 —— `opacity=0.5` 只作用于 RGB。
+11. **`xtask golden` 只在有 adapter 的机器上才是真比对**（见上），闸门里它绿不代表 wasm/android 侧
+    像素正确；那两端仍只有 `readback.rs` 级别的冒烟覆盖。
 
 ## T6 文本 + Bitmap 渲染目标 + clip stack
 - [ ] `sisf-text/src/lib.rs`：`FontAtlas`（`R8Unorm` 子图集 + `etagere`）+ `layout(text,style)->TextRun`（`cosmic-text 0.19`，shaping/bidi/换行，wasm ✓），字形最终输出为普通 sprite quad、不新增 pipeline。验收：中英混排 + 自动换行；字号 12/16/24 golden。

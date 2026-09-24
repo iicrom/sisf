@@ -1,9 +1,13 @@
-//! 批量 quad 渲染器：surface 生命周期（T2）+ 实例管线与批处理（T3）。
+//! 批量 quad 渲染器：目标生命周期（T2 交换链 / T5 离屏）+ 实例管线与批处理（T3）。
 //!
 //! 帧序：`begin_frame(FrameU, clear)` → `App::draw` 里 `push`/`push_list` 收集实例 →
 //! `end_frame()` 排序分组、写环形缓冲、开**一个** render pass 逐批 draw、提交并呈现。
 //! 之所以 pass 在 `end_frame` 里才开：wgpu 的 `RenderPass` 借用 encoder 与视图，
 //! 跨方法持有会把 `Renderer` 变成自引用结构；T6 的 Bitmap-RT 嵌套 pass 再一并改造。
+//!
+//! 目标有两种（`Target`）：窗口交换链，或 `new_offscreen` 建的离屏纹理 +
+//! `readback()`（wgpu 30 无软件光栅，golden 必须走真 adapter，见 `docs/platforms.md`）。
+//! 两条路径共用同一套 `Quad`（管线/槽/bind group），所以离屏断言即出货断言。
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -64,10 +68,51 @@ type SurfaceCfg = wgpu::SurfaceConfiguration;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameStatus {
     Presented,
+    /// 离屏目标：本帧已写进纹理（没有交换链，故不谈"呈现"）。
+    Rendered,
     /// Lost/Outdated：已按缓存配置重配，本帧丢弃。
     Reconfigured,
     /// 尺寸无效/遮挡/超时等，跳过本帧呈现。
     Skipped(&'static str),
+}
+
+/// 一帧的落地目标：窗口交换链，或离屏纹理（golden 读回、T6 的 Bitmap-RT 同一条通路）。
+enum Target {
+    Surface {
+        surface: wgpu::Surface<'static>,
+        config: Option<SurfaceCfg>,
+    },
+    Offscreen {
+        texture: wgpu::Texture,
+        view: wgpu::TextureView,
+        size: (u32, u32),
+    },
+}
+
+/// 离屏目标的纹理格式：与最常见的 surface 格式一致，golden 才证明的是同一条管线。
+const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+fn make_offscreen_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("sisf-offscreen"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: OFFSCREEN_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+    (texture, view)
 }
 
 pub struct Renderer {
@@ -75,8 +120,7 @@ pub struct Renderer {
     pub adapter: wgpu::Adapter,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
-    pub surface: wgpu::Surface<'static>,
-    config: Option<SurfaceCfg>,
+    target: Target,
     quad: Option<Quad>,
     ring: InstanceRing,
     frame: Option<PendingFrame>,
@@ -552,8 +596,10 @@ impl Renderer {
             adapter,
             device,
             queue,
-            surface,
-            config: None,
+            target: Target::Surface {
+                surface,
+                config: None,
+            },
             quad: None,
             ring: InstanceRing::new(DEFAULT_QUADS_PER_SLOT, FRAMES_IN_FLIGHT),
             frame: None,
@@ -566,22 +612,159 @@ impl Renderer {
         })
     }
 
-    /// 配置/重配交换链。零尺寸直接忽略（Windows 最小化会先送 0x0）。
+    /// 无窗口渲染器：离屏 `OFFSCREEN_FORMAT` 纹理（`COPY_SRC`），配 `readback` 读像素。
+    ///
+    /// 与窗口路径共用同一套 `Quad`/管线/环形槽，所以 golden 断言的就是实际出货的管线
+    /// （wgpu 30 没有软件光栅后端，离屏也必须要有真 adapter，见 `docs/platforms.md`）。
+    pub async fn new_offscreen(width: u32, height: u32) -> Result<Self, RendererError> {
+        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        desc.backends = wgpu::Backends::all();
+        let instance = wgpu::Instance::new(desc);
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions::default())
+            .await?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("sisf-offscreen"),
+                required_features: wgpu::Features::empty(),
+                required_limits: adapter.limits().clone(),
+                ..Default::default()
+            })
+            .await?;
+        let (texture, view) = make_offscreen_texture(&device, width, height);
+        let mut me = Self {
+            instance,
+            adapter,
+            device,
+            queue,
+            target: Target::Offscreen {
+                texture,
+                view,
+                size: (width, height),
+            },
+            quad: None,
+            ring: InstanceRing::new(DEFAULT_QUADS_PER_SLOT, FRAMES_IN_FLIGHT),
+            frame: None,
+            pending: BatchList::new(),
+            scratch: Vec::new(),
+            stats: None,
+            epoch_views: HashMap::new(),
+            warned_epochs: Vec::new(),
+            // 线框只用于窗口调试，离屏通路永远实心。
+            allow_lines: false,
+        };
+        me.ensure_quad(OFFSCREEN_FORMAT);
+        Ok(me)
+    }
+
+    /// 配置/重配交换链（离屏目标则按新尺寸重建纹理）。零尺寸直接忽略（Windows 最小化会先送 0x0）。
     pub fn configure(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
         }
-        let Some(cfg) = self
-            .surface
-            .get_default_config(&self.adapter, width, height)
-        else {
-            eprintln!("sisf-render: surface {width}x{height} 无默认配置，跳过");
-            return;
+        let format = match &mut self.target {
+            Target::Surface { surface, config } => {
+                let Some(cfg) = surface.get_default_config(&self.adapter, width, height) else {
+                    eprintln!("sisf-render: surface {width}x{height} 无默认配置，跳过");
+                    return;
+                };
+                surface.configure(&self.device, &cfg);
+                let format = cfg.format;
+                *config = Some(cfg);
+                format
+            }
+            Target::Offscreen {
+                texture,
+                view,
+                size,
+            } => {
+                if *size == (width, height) {
+                    return;
+                }
+                let (t, v) = make_offscreen_texture(&self.device, width, height);
+                *texture = t;
+                *view = v;
+                *size = (width, height);
+                OFFSCREEN_FORMAT
+            }
         };
-        self.surface.configure(&self.device, &cfg);
-        let format = cfg.format;
-        self.config = Some(cfg);
         self.ensure_quad(format);
+    }
+
+    /// 是否已经有一个可用的绘制目标。
+    pub fn is_configured(&self) -> bool {
+        match &self.target {
+            Target::Surface { config, .. } => config.is_some(),
+            Target::Offscreen { .. } => true,
+        }
+    }
+
+    /// 离屏目标：把整张纹理读回成 `RGBA8`（sRGB 字节，行无填充，`w*h*4`）。
+    ///
+    /// 每次调用都新建读回缓冲——golden 是低频路径，不做池化。
+    pub fn readback(&mut self) -> Result<Vec<u8>, RendererError> {
+        let (texture, (width, height)) = match &self.target {
+            Target::Offscreen { texture, size, .. } => (texture.clone(), *size),
+            Target::Surface { .. } => {
+                return Err(RendererError::Readback(
+                    "交换链目标不能读回，请用 `new_offscreen`".to_owned(),
+                ));
+            }
+        };
+        let pitch = (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sisf-readback"),
+            size: u64::from(pitch) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(pitch),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(std::iter::once(encoder.finish()));
+        let slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| RendererError::Readback(e.to_string()))?;
+        rx.recv()
+            .map_err(|e| RendererError::Readback(e.to_string()))?
+            .map_err(|e| RendererError::Readback(e.to_string()))?;
+        let mapped = slice
+            .get_mapped_range()
+            .map_err(|e| RendererError::Readback(e.to_string()))?;
+        let row_bytes = usize::try_from(width * 4).expect("行字节数不溢出");
+        let mut out = vec![0u8; row_bytes * usize::try_from(height).expect("行号不溢出")];
+        for y in 0..height {
+            let from = usize::try_from(y * pitch).expect("偏移不溢出");
+            let to = usize::try_from(y).expect("行号不溢出") * row_bytes;
+            out[to..to + row_bytes].copy_from_slice(&mapped[from..from + row_bytes]);
+        }
+        drop(mapped);
+        buffer.unmap();
+        Ok(out)
     }
 
     /// 按当前 surface 格式准备（或重建）GPU 资源；格式变了必须重建管线。
@@ -603,109 +786,20 @@ impl Renderer {
         }
     }
 
-    pub fn is_configured(&self) -> bool {
-        self.config.is_some()
-    }
-
-    /// 无窗口地把 `clear` 清进一张 4x4 `COPY_SRC` 纹理并读回左上像素。
+    /// 无窗口地把 `clear` 清进一张 4x4 离屏纹理并读回左上像素。
     /// 用途：在没有可用 surface 的环境里证明"GPU 清屏通路 + 颜色换算"正确
-    /// （T5 golden 读回的同一条路径，也用于排查"呈现成功但屏幕无内容"）。
+    /// （走的就是 `new_offscreen` + `end_frame` + `readback`，即 T5 golden 的同一条路径）。
     pub async fn readback_clear(clear: Rgba) -> Result<[u8; 4], RendererError> {
-        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
-        desc.backends = wgpu::Backends::all();
-        let instance = wgpu::Instance::new(desc);
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions::default())
-            .await?;
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("sisf-readback"),
-                required_features: wgpu::Features::empty(),
-                required_limits: adapter.limits().clone(),
-                ..Default::default()
-            })
-            .await?;
-        const SIZE: u32 = 4;
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("readback"),
-            size: wgpu::Extent3d {
-                width: SIZE,
-                height: SIZE,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        {
-            let mut encoder = device.create_command_encoder(&Default::default());
-            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("readback-clear"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &texture.create_view(&Default::default()),
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(to_color(clear)),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            drop(pass);
-            let block_bytes = (SIZE * 4).next_multiple_of(256);
-            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("readback"),
-                size: (block_bytes * SIZE) as u64,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
-            encoder.copy_texture_to_buffer(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::TexelCopyBufferInfo {
-                    buffer: &buffer,
-                    layout: wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(block_bytes),
-                        rows_per_image: Some(SIZE),
-                    },
-                },
-                wgpu::Extent3d {
-                    width: SIZE,
-                    height: SIZE,
-                    depth_or_array_layers: 1,
-                },
-            );
-            queue.submit(std::iter::once(encoder.finish()));
-            let slice = buffer.slice(..);
-            let (tx, rx) = std::sync::mpsc::channel();
-            slice.map_async(wgpu::MapMode::Read, move |r| {
-                let _ = tx.send(r);
-            });
-            device
-                .poll(wgpu::PollType::wait_indefinitely())
-                .map_err(|e| RendererError::Readback(e.to_string()))?;
-            rx.recv()
-                .unwrap()
-                .map_err(|e| RendererError::Readback(e.to_string()))?;
-            let mut out = [0u8; 4];
-            {
-                let view = slice
-                    .get_mapped_range()
-                    .map_err(|e| RendererError::Readback(e.to_string()))?;
-                out.copy_from_slice(&view[..4]);
-            }
-            buffer.unmap();
-            Ok(out)
+        let mut r = Self::new_offscreen(4, 4).await?;
+        r.begin_frame(&FrameU::identity(0.0), clear);
+        match r.end_frame() {
+            FrameStatus::Rendered => {}
+            other => return Err(RendererError::Readback(format!("离屏帧未完成: {other:?}"))),
         }
+        let px = r.readback()?;
+        let mut out = [0u8; 4];
+        out.copy_from_slice(&px[..4]);
+        Ok(out)
     }
 
     /// 登记一个纹理代号（图集页/Bitmap-RT）供批次取用。T4 的图集走这里。
@@ -766,26 +860,10 @@ impl Renderer {
         self.pending.len()
     }
 
-    /// 取当前交换链图像；Lost/Outdated 时按缓存配置重配并报告。
-    fn acquire(&mut self) -> Result<wgpu::SurfaceTexture, FrameStatus> {
-        match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(st)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(st) => Ok(st),
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                if let Some(cfg) = self.config.clone() {
-                    self.surface.configure(&self.device, &cfg);
-                }
-                Err(FrameStatus::Reconfigured)
-            }
-            wgpu::CurrentSurfaceTexture::Timeout => Err(FrameStatus::Skipped("timeout")),
-            wgpu::CurrentSurfaceTexture::Occluded => Err(FrameStatus::Skipped("occluded")),
-            wgpu::CurrentSurfaceTexture::Validation => Err(FrameStatus::Skipped("validation")),
-        }
-    }
-
-    /// 收尾：排序分组 → 写 uniform 与实例槽 → **一个** render pass 逐批 draw → 提交呈现。
+    /// 收尾：排序分组 → 写 uniform 与实例槽 → **一个** render pass 逐批 draw → 提交（交换链再呈现）。
     ///
-    /// 空实例集合也走完整流程，等价于一次清屏（T2 的行为）。
+    /// 空实例集合也走完整流程，等价于一次清屏（T2 的行为）。离屏目标返回
+    /// `Rendered`，随后用 `readback` 取像素。
     pub fn end_frame(&mut self) -> FrameStatus {
         let Some(PendingFrame { frame_u, clear }) = self.frame.take() else {
             self.pending.reset();
@@ -813,16 +891,20 @@ impl Renderer {
             &mut self.scratch,
         );
 
-        let st = match self.acquire() {
-            Ok(st) => st,
+        // 目标视图：交换链每帧现取（`SurfaceTexture` 必须活到 submit 之后），
+        // 离屏则借现有视图（clone 一下即可解开对 `self.target` 的借用）。
+        let acquired = match &self.target {
+            Target::Surface { surface, config } => acquire(surface, &self.device, config)
+                .map(|st| (st.texture.create_view(&Default::default()), Some(st))),
+            Target::Offscreen { view, .. } => Ok((view.clone(), None)),
+        };
+        let (view, st) = match acquired {
+            Ok(pair) => pair,
             Err(status) => {
                 self.quad = Some(quad);
                 return status;
             }
         };
-        let view = st
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("sisf"),
         });
@@ -856,9 +938,36 @@ impl Renderer {
             flushes: self.ring.flushes(),
         });
         queue.submit(std::iter::once(encoder.finish()));
-        queue.present(st);
         self.quad = Some(quad);
-        FrameStatus::Presented
+        match st {
+            Some(st) => {
+                queue.present(st);
+                FrameStatus::Presented
+            }
+            None => FrameStatus::Rendered,
+        }
+    }
+}
+
+/// 取当前交换链图像；Lost/Outdated 时按缓存配置重配并报告。
+fn acquire(
+    surface: &wgpu::Surface<'static>,
+    device: &wgpu::Device,
+    config: &Option<SurfaceCfg>,
+) -> Result<wgpu::SurfaceTexture, FrameStatus> {
+    match surface.get_current_texture() {
+        wgpu::CurrentSurfaceTexture::Success(st) | wgpu::CurrentSurfaceTexture::Suboptimal(st) => {
+            Ok(st)
+        }
+        wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+            if let Some(cfg) = config.clone() {
+                surface.configure(device, &cfg);
+            }
+            Err(FrameStatus::Reconfigured)
+        }
+        wgpu::CurrentSurfaceTexture::Timeout => Err(FrameStatus::Skipped("timeout")),
+        wgpu::CurrentSurfaceTexture::Occluded => Err(FrameStatus::Skipped("occluded")),
+        wgpu::CurrentSurfaceTexture::Validation => Err(FrameStatus::Skipped("validation")),
     }
 }
 
