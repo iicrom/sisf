@@ -12,9 +12,14 @@
 // 3. 稳态不欠载（预热之后 underrun 不再涨），且 60fps 下深度就是目标 1024 帧 = 21.3ms
 //    （不拿延迟换保险）。
 //
-// 消息投递比浏览器**更苛刻**：这里 drain 回报是同步送达的，而浏览器会把它们排到下一个任务。
+// 消息投递默认比浏览器**更苛刻**：drain 回报与 write 都是同步送达的，不给消息留队列。
 // 所以这里绿不代表浏览器一定绿，最终判据仍是控制台那行 `buffered=`/`underrun=`；
 // 它绿只是把"明显的账错"挡在人手复验之前。永久化的家应该是 `xtask wasm-test`（todo.md 后续项）。
+//
+// 探针（默认关，开着不进判据）：`--transit N` 把"主线程 → 处理器"的 write 投递推迟 N 个 quant，
+// 用来量 `bufferedFrames()` 里"已 postMessage 但处理器还没收到"那部分在途帧。N=1 时 60fps 仍稳、
+// 50fps 起结构性欠载（报的深度比可取的多 ~900f）—— 也就是说"把在途算成可用"这个建模误差是真的，
+// 但它在浏览器上占多大比重还没测（见 `docs/audio-web.md`「残余的 ~384 帧/秒」）。
 //
 // 退出码非 0 = 判据不过。
 
@@ -46,7 +51,19 @@ if (!Processor) fail('registerProcessor 没被调用');
 
 const RATE = 48_000;
 const QUANT = 128;
-const CAP = 4096; // 与 glues 里的 RING_FRAMES 对齐（只影响"能补多少"，不参与判据）
+const CAP = 4096; // 与 glues 里的 RING_FRAMES 对齐（只影响"能补多少"，不参与判据)
+
+/// 主线程 → 处理器的消息延迟（单位：quant）。0 = 同步投递（默认，判据按它写）。
+/// >0 用来复现浏览器上那个"报出来的深度比处理器真实可取的深度多一截"的现象：
+/// worklet 在独立线程，`postMessage` 出去的数据要等一次消息投递才对它可见，而
+/// `workerPending` 在 post 的那一刻就把它算进 `bufferedFrames()` ⇒ 报出的深度含"在途"。
+/// 见 `docs/audio-web.md`「残余的 ~384 帧/秒」。
+const TRANSIT = (() => {
+  const i = process.argv.indexOf('--transit');
+  return i >= 0 ? Math.max(0, parseInt(process.argv[i + 1], 10) || 0) : 0;
+})();
+
+const world = { proc: null, quantum: 0, inFlight: [] };
 
 function makePort() {
   return {
@@ -54,18 +71,31 @@ function makePort() {
     peer: null,
     // 同步投递：比浏览器更急，不给消息留队列。
     postMessage(data) {
+      if (TRANSIT > 0 && this.deliverLater) {
+        world.inFlight.push({ at: world.quantum + TRANSIT, port: this.peer, data });
+        return;
+      }
       this.peer?.onmessage?.({ data });
     },
   };
 }
 
-const world = { proc: null };
+/// 把到期的消息送进对端（每个 quant 之前调一次）。
+function deliverDue() {
+  if (!world.inFlight.length) return;
+  const due = [];
+  world.inFlight = world.inFlight.filter((m) => (m.at <= world.quantum ? (due.push(m), false) : true));
+  for (const m of due) m.port.onmessage?.({ data: m.data });
+}
+
 globalThis.AudioWorkletNode = class {
   constructor() {
     const main = makePort();
     const proc = makePort();
     main.peer = proc;
     proc.peer = main;
+    // 只有"主线程 → 处理器"这一个方向按 quant 排队投递（TRANSIT>0 时）。
+    main.deliverLater = TRANSIT > 0;
     globalThis.__pendingPort = proc;
     world.proc = new Processor();
     this.port = main;
@@ -112,6 +142,8 @@ function fail(msg) {
 const verbose = process.argv.includes('--verbose');
 // 每个帧率各跑一遍：预热 1s 之后，深度必须贴住、underrun 必须不再涨。
 for (const fps of [60, 50, 42, 30, 20]) {
+  world.quantum = 0;
+  world.inFlight = [];
   const mod = await import('file://' + GLUE.replace(/\\/g, '/') + '?fps=' + fps);
   mod.sisfAudioCreate();
   await Promise.resolve();
@@ -149,18 +181,22 @@ for (const fps of [60, 50, 42, 30, 20]) {
     }
     out[0].fill(0);
     out[1].fill(0);
+    deliverDue(); // 到期的 write 这才对处理器可见
     world.proc.process([], [out]);
+    world.quantum++;
     frame += QUANT;
   }
   const grew = mod.sisfAudioStats()[2] - warmUnderrun;
-  const name = `fps=${fps}`;
+  const name = TRANSIT > 0 ? `fps=${fps} transit=${TRANSIT}q` : `fps=${fps}`;
   if (minBuf < 0) fail(`${name}: buffered 出现负值 ${minBuf} ⇒ 记账又双扣了`);
-  if (maxLag > QUANT) {
+  if (TRANSIT === 0 && maxLag > QUANT) {
     fail(`${name}: 报的深度与真实排队量最大差 ${maxLag} 帧 > 一个 quant ⇒ 有一处帧被扣了两次`);
   }
-  if (grew > 0) fail(`${name}: 预热后 underrun 又涨了 ${grew} 帧 ⇒ 需求阈值撑不住这个帧率`);
+  if (grew > 0) {
+    fail(`${name}: 预热后 underrun 又涨了 ${grew} 帧 ⇒ 需求阈值撑不住这个投递模型（报的深度比可取的多 ${maxLag} 帧）`);
+  }
   // 60fps 必须恰好是目标深度：这一条钉住"不拿延迟换保险"。
-  if (fps === 60 && minBuf > 1024 + QUANT) {
+  if (TRANSIT === 0 && fps === 60 && minBuf > 1024 + QUANT) {
     fail(`fps=60: 稳态深度 ${minBuf} 明显高于目标 1024 ⇒ 需求阈值把延迟白抬了`);
   }
   console.log(

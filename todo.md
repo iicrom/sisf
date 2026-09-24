@@ -259,14 +259,17 @@
     次调用看得见就会退化成每 rAF 只补 256 帧的一个 block，实测 `want=2048 pushed=1024` 仍欠载），所以
     JS 里存了 `catchUpFrames`；② 判据用 `refill_samples(2286, cap) > 2286` 这种"一帧 30fps 也补得回来"
     的形状断言，别只断"等于 TARGET"。
-15. **浏览器上的残余 `underrun` 是主线程长尾，别再去改账**。修账后从页面里每 rAF 采一次
-    `sisfAudioStats()`（同 URL 动态 import ⇒ 同一个模块实例），8s / 681 tick：帧时长
-    p50 12ms、p99 25ms、max 28ms，24 个 tick >20ms，**8 个 tick 有增量且每个都是 384 帧**，
-    其余 673 个 tick 全零。算术对得上：`TARGET_FRAMES = 1024` 就是 21.3ms 的预算，tick 超过它就缺
-    `dt − 预算` 再按 128 的 quant 向上取整 ⇒ 3 个 quant = 8ms。所以这是**定价问题**（要不要拿延迟换
-    保险：`TARGET_FRAMES=1536` 可盖住 p99=25ms，可控延迟 21.3→32ms），不是第 12 条那种账错；清单写的
-    是 ≤~21ms@1024 ⇒ 本阶段保留 1024 并把长尾记进 `docs/audio-web.md`。native 侧无此纠结（cpal 线程
-    不抖，13s `underrun+0`）。
+15. **浏览器上的残余 `underrun` 只定性了一半，别急着当成"预算不够"**。修账后每 rAF 采一次
+    `sisfAudioStats()`（同 URL 动态 import ⇒ 同一个模块实例），8s / 681 tick：帧时长 p50 12ms、
+    p99 25ms、max 28ms，**8 个 tick 有增量、其余 673 个全零，且每个增量都是 384 帧**。
+    已测清的：与第 12 条那种双扣无关（深度全程贴目标、不为负、只在 >20ms 的 tick 上缺）。
+    没测清的：缺口**不随 dt 增长**（21.6ms 与 28.0ms 的长帧各缺 3 个 quant），这更像
+    `bufferedFrames()` 把"已 `postMessage`、处理器还没收到"的在途帧也算成可用深度。
+    node 里加探针能造出这个形态（`--transit 1`：60fps 稳、50fps 起结构性欠载，报的深度比可取的多
+    ~900f），但浏览器里它占多大比重要等 ack 带上 `queued`（处理器自己队里的真实剩余）才量得出来。
+    两种改法都是**拿延迟换保险**（抬 `TARGET_FRAMES` 到 1536 = 32ms，或先在 ack 里测真实深度再定预算），
+    而清单钉的是"≤~21ms@1024" ⇒ 本阶段保留 1024，把这条挂成待决，不偷偷改延迟契约。
+    native 侧无此纠结（cpal 线程不抖，13s `underrun+0`）。
 
 
 ## T8 动画 + MoveRoute + 固定 tick
