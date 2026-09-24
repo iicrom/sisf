@@ -170,14 +170,72 @@
    （离屏 scale 恰为 1）。
 
 ## T7 音频混音器 + OGG/MP3/WAV + MIDI(SF2)
-- [ ] `sisf-audio/src/mixer.rs`（纯 Rust，不碰设备）：`Voice{data,pos,gain,pan,loop_start,loop_end,rate}`、`render(&mut,self,out:&mut [f32])` 交织立体声；通道 `Bgm/Bgs/Me/Se`（Se 多路复用 + voice 上限抢占）、`fade`、`play/stop/pause/resume/suspend`。验收：`render` 确定性单测（四端可跑，无设备）。
-- [ ] `sisf-media/src/audio.rs`：`trait Decoder{ channels, sample_rate, read, seek_sample }`，`symphonia 0.6.1 features=["ogg","vorbis","mp3","wav"]`（纯 Rust，wasm ✓）；`lewton 0.10.2` 仅作 `ogg-lewton` 回退 feature（默认关）。验收：OGG/MP3/WAV fixture 采样长度断言。
-- [ ] 循环点：`lofty 0.25.4` 读元数据 → `AudioData{loop_start_samples,loop_end_samples}`。验收：带 loop 的 OGG 无缝循环（samples 级断言 + 听测）。
-- [ ] `pump_native.rs`：`cpal 0.18.2` 回调内直接 `Mixer::render`（混音状态由主线程改、回调读快照/双缓冲，不加锁）；设备变更与 `StreamError` 重建流。验收：Win 播放无爆音，插拔耳机不断流。
-- [ ] `pump_web.rs` + `web/audio_worklet.js`：`AudioWorklet`（不可用则 `ScriptProcessor`）从 WASM 拉混音输出；`AudioBus::suspend/resume` 绑 visibilitychange + 首次点击解锁。验收：Chrome-wasm 播 BGM/SE，`docs/audio-web.md` 记延迟实测（目标 ≤~21ms@1024）。
-- [ ] `sisf-media/src/midi.rs`（feature `midi`）：`midly 0.5.3` 解析 + `rustysynth 1.3.6` SF2 合成，`SoundBank::from_sf2(&[u8])` 经 VFS（**引擎不附带 SoundFont**），MIDI 作为一路 Voice 参与同一 Mixer。验收：给定用户 SF2 时播放 fixture `.mid`；无 SF2 返回 `MissingSoundBank` 并提示（不 panic）；文档给出"离线把 .mid 预渲染成 .ogg"退路。
-- [ ] `examples/audio_demo.rs`：BGM 循环 + `Space` 播 SE + `M` 播 `.mid`。验收：`cargo xtask check-all` 含 `--features midi` 组合绿。
-- 验收（整段）：mixer 单测 + Win/Chrome 听测 → 提交 `P6 audio+ogg/mp3/wav+midi`。
+- [x] `sisf-audio/src/mixer.rs`（纯 Rust，不碰设备）：`Voice{data,pos,gain,pan,loop_start,loop_end,rate}`、`render(&mut,self,out:&mut [f32])` 交织立体声；通道 `Bgm/Bgs/Me/Se`（Se 多路复用 + voice 上限抢占）、`fade`、`play/stop/pause/resume/suspend`。验收：`render` 确定性单测（四端可跑，无设备）。→ `mixer::tests` **19 项**，含 `render_is_bitwise_deterministic`（同输入两遍逐位相等）/`se_pool_preempts_the_oldest_voice`/`bgm_replacement_crossfades_the_old_voice`/`fade_stops_the_channel_exactly_at_requested_frames`（淡出按帧不按墙钟）/`suspend_freezes_positions_and_silences`/`pause_silences_the_channel_and_freezes_its_position`（通道级暂停是独立状态）/`output_is_hard_clamped`/`invalid_inputs_are_rejected_not_panicked`。`mixer` 无条件编译，任何 feature 组合都在。
+- [x] `sisf-media/src/audio.rs`：`trait Decoder{ channels, sample_rate, read, seek_sample }`，`symphonia 0.6.1 features=["ogg","vorbis","mp3","wav"]`（纯 Rust，wasm ✓）；`lewton 0.10.2` 仅作 `ogg-lewton` 回退 feature（默认关）。验收：OGG/MP3/WAV fixture 采样长度断言。→ `audio::tests` 7 项 + `audio::lewton_backend::tests` 5 项（`ogg-lewton` 下）：三份 fixture 的帧数/时长/采样率逐条断言（OGG 88200 帧 = 2.00s@44.1k、WAV 22050、MP3 44100），`sniff` 按魔数分派（不认扩展名）、未开 feature 的容器报 `UnsupportedFormat`。
+- [x] 循环点：`lofty 0.25.4` 读元数据 → `AudioData{loop_start_samples,loop_end_samples}`。验收：带 loop 的 OGG 无缝循环（samples 级断言 + 听测）。→ fixture 的 `LOOPSTART/LOOPEND = [8820, 35280)` 解码后原样保留（`audio::tests` 逐值断言 + `bus::tests::ogg_loop_tags_survive_into_a_voice` 在 `AudioBus` 通路上断言 pump 80 次后落在循环区内）；`metadata_loop_points_wrap_seamlessly`/`whole_file_loop_restarts_at_zero` 钉住"越过 `loop_end` 才回绕、intro 照常播完"。听测：`cargo run -p sisf --example audio_demo --features ogg,mp3,wav,midi -- 14` 复跑，12s OGG 回绕处 `underrun+0`（修前是 `+4480`，见下第 7 条）。
+- [x] `pump_native.rs`：`cpal 0.18.2` ~~回调内直接 `Mixer::render`~~（做不到，见下第 5 条：改为主线程混音 + SPSC 环，锁仍为 0）；设备变更与 `StreamError` 重建流。验收：Win 播放无爆音，插拔耳机不断流。→ `pump_native::tests` 6 项（环跨线程搬运逐样本对齐、环绕与 overflow 计数、`pump_runs_silently_without_a_device`）+ 真设备复跑 14s：`ring=1120f underrun=64s overflow=0s callbacks=1388 streams=1 err=-`、逐秒 `underrun+0`、`混音推进 13.91s / 墙钟 14.00s（99%）`。64 样本全部来自"启动时宿主无默认输出设备 → `OPEN_RETRY` 2s 后拿到 `Headphones … @48000Hz/2ch F32`"那一窗（降级路径被真实撞到）。⚠️ **插拔耳机/切默认设备不断流仍待人工**（需要物理操作，机器替代不了）。
+- [x] `pump_web.rs` + ~~`web/audio_worklet.js`~~（落地成 `crates/sisf-audio/src/audio_pump.js` 内联 Blob，见下第 6 条）：`AudioWorklet`（不可用则 `ScriptProcessor`）从 WASM 拉混音输出；`AudioBus::suspend/resume` 绑 visibilitychange + 首次点击解锁。验收：Chrome-wasm 播 BGM/SE，`docs/audio-web.md` 记延迟实测（目标 ≤~21ms@1024）。→ 编译面绿：`cargo xtask check-all` 新增的第四组 `wasm32 --no-default-features --features web,ogg,mp3,wav,midi`（含 `--all-targets`，即示例本身）0 warning。通路选择/解锁/延迟口径写成 `docs/audio-web.md`。⚠️ **Chrome 听测与延迟实测表仍空**（我不能导航；`cargo xtask web audio_demo` 已备好，等你开 `http://127.0.0.1:8080/?ex=audio_demo` 后贴 Console 那行 `state=… kind=… total=…ms`）。
+- [x] `sisf-media/src/midi.rs`（feature `midi`）：`midly 0.5.3` 解析 + `rustysynth 1.3.6` SF2 合成，`SoundBank::from_sf2(&[u8])` 经 VFS（**引擎不附带 SoundFont**），MIDI 作为一路 Voice 参与同一 Mixer。验收：给定用户 SF2 时播放 fixture `.mid`；无 SF2 返回 `MissingSoundBank` 并提示（不 panic）；文档给出"离线把 .mid 预渲染成 .ogg"退路。→ `midi::tests` 9 项（`midi_info` 轨数/时长、`MidiDecoder` 定长读、`seek_sample(0)` 回绕、循环类型分派、无 bank ⇒ `MissingSoundBank`；其中 2 项需要用户素材，做成 env 开关：`SISF_SF2=/path/to/bank.sf2 cargo test -p sisf-media --features midi -- --ignored`，断"同参数两次渲染逐位一致"与"内部循环模式永不结束、只在 0 处回绕"）+ 真机两遍：demo 的 `M` cue 打出 `缺少 SoundFont（SF2）: …或离线把 .mid 预转成 .ogg`，通道状态不变、不 panic。SF2 那条只能由用户自备素材自证（仓库故意不存，退路命令在 `docs/audio.md`）。
+- [x] `examples/audio_demo.rs`：BGM 循环 + `Space` 播 SE + `M` 播 `.mid`（键盘事件本阶段还没有，改成确定性时间线驱动同一套 `fire()`，见下第 8 条）。验收：`cargo xtask check-all` 含 `--features midi` 组合绿。→ 示例注册带 `required-features = ["ogg","mp3","wav"]`，故 web-only / native-only 两组是**跳过**而不是失败；`xtask web` 构建 feature 从 `web` 改成 `WEB_AUDIO_FEATURES = "web,ogg,mp3,wav,midi"`。四份 fixture 已进 `web/assets/manifest.txt`。
+- 验收（整段）：mixer 单测 + Win/Chrome 听测 → 提交 `P6 audio+ogg/mp3/wav+midi`。落地说明见 `docs/audio.md`（四层与 feature 边界、通道模型与循环默认值、三个容器三种循环点读法、native 主线程混音 + SPSC 环、MIDI 三档兜底、能力/平台矩阵、两个真坑）+ `docs/audio-web.md`（worklet 与 ScriptProcessor 的语义差、延迟口径、手测步骤与实测表）。→ `cargo test -p sisf-audio --all-features` **33 绿**（mixer 19 + bus 8 + pump_native 6）+ `cargo test -p sisf-media --all-features` 音频侧 21（2 项要 `SISF_SF2`）+ `cargo test --workspace --all-features` **176 绿 0 红** + `cargo xtask check-all` 四组 0 warning + `cargo xtask clippy`（win + wasm，`-D warnings`）+ `cargo xtask fmt --check` 净 + Windows 真设备有界复跑（上面第 4 条那行）。⚠️ 整段验收还差**人工两听**：Win 长时间播放 + 插拔耳机；Chrome-wasm 播 BGM/SE。
+
+### T7 期间发现并修正的事实（供后续阶段引用）
+1. **`sisf/{ogg,mp3,wav,midi}` 必须同时转发 `sisf-media/*` 与 `sisf-audio/*`**。第一版只转给 media，
+   于是示例里 `bus.play_midi(...)` 报 `E0599 no method named play_midi`（`AudioBus` 的 MIDI 方法门控在
+   `sisf-audio` 自己的 `midi` 上）。门面转发规则：**下游 crate 里凡是 gate 了某个 API 的 feature，
+   转发时不能省**，否则 API 在门面层蒸发。
+2. **ME 不能默认循环**。独占通道 ≠ 循环：早期写法 `looping = !channel.shared()` 把 ME 算进了 BGM 那一侧，
+   一声过关音乐就此挂住不放（demo 日志里 ME 的位置每秒在 470/587 之间来回 = 每秒回绕一次）。现在
+   `Channel::loops_by_default()` 只对 `Bgm/Bgs` 为真，`only_background_channels_loop_by_default` 逐通道钉住。
+3. **`play_bytes` 在调用线程整段解码**，2s 立体声 OGG 在 debug 构建 ~90ms，而输出环目标深度只有
+   `TARGET_FRAMES = 1024`（≈21ms）⇒ 回绕那一下真能听见爆音（实测 `underrun+4480`）。游戏侧正确形状是
+   **读一次、解一次、之后复用 `Arc<AudioData>`**；异步版走 T4 的 `AssetStore`。这条决定了示例的形状。
+4. **lofty 必须保留默认 feature `id3v2_compression_support`**：0.25.4 关掉它会在
+   `id3/v2/frame/read.rs` 留下未导入的 `Id3v2Error*`（上游 cfg 断裂）→ 直接编译失败。另外循环点必须走
+   `VorbisFile`/`MpegFile` 这类**具体文件类型**：通用 `TaggedFile` 通路会把映射不到的键丢掉，而
+   `LOOPSTART` 恰好就是映射不到的那种（`ItemKey` 是封闭枚举，无 unknown 变体）。
+5. **cpal 的 data callback 是 `FnMut + Send + 'static`，`Mixer` 里有 `Box<dyn Decoder>`（非 `Send`）**
+   ⇒ 清单字面的"回调内直接 `Mixer::render`"做不到：要么套锁（清单禁止），要么 `unsafe` 造跨线程 `&mut`
+   （UB）。形状改成"主线程混音 + SPSC 环（原子下标 + `AtomicU32` 样本位型，Relaxed 存样本 /
+   Release-Acquire 发布游标）+ 回调只取数与格式转换"，锁依然是 0 个。`Ring` 的 `underrun_samples` /
+   `overflow_samples` 是这条通路的观测量。
+6. **AudioWorklet 不能同步回调主线程 WASM**（需要 SharedArrayBuffer + Atomics ⇒ COOP/COEP 跨源隔离 +
+   `+atomics` 目标，本仓库两样都没开）。所以 worklet 通路 = 需求上报（`sisfAudioFramesNeeded`）+ 主线程
+   按需求渲染 + `postMessage` 拷贝；只有 `ScriptProcessor` 回退通路才是字面的同步 pull。清单里的
+   `web/audio_worklet.js` 落地成 `audio_pump.js` 里的 `WORKLET_SRC` 内联 Blob（`addModule()` 只吃
+   URL，用 `URL.createObjectURL(new Blob([…]))` 免开文件）。**胶水本身不是内联的**：
+   `module = "/src/…js"` 让 wasm-bindgen 把它拷成 `web/pkg/snippets/sisf-audio-<hash>/src/audio_pump.js`
+   再由 `pkg/<例>.js` 相对 import —— 静态服务必须连 `snippets/` 一起给（`xtask web` 服务整个 `web/`，
+   正好覆盖），改了胶水要重跑 `xtask web` 且浏览器可能缓存那个 URL。
+7. **"开不出输出设备"必须是一等可观测状态而不是错误**。`Pump::new()` 永不失败；无设备时走静音混音
+   （混音时钟照常推进、fade 照常到点、SE 照常回收），`stats().device == None` + `describe()` 打出来。
+   本机真实撞到：进程启动时宿主没有默认输出设备，2s 重试后才拿到 `Headphones … F32`，全程 `streams=1`
+   （没有重建流）· `err=-`。CI 与无声卡机器因此能跑完整段验收。
+8. **`EngineEvent` 现在只有 `Lifecycle`**（Key/Pointer/Action/Custom 在 T9）⇒ 示例无法用 `Space`/`M`，
+   改成 12s 确定性时间线驱动**同一个** `fire(cue)` 函数。T9 落地后把时间线换成事件回调即可，播放代码不动。
+   另外 wasm 首帧素材还在飞（`fetch` 异步），示例每帧试读 VFS 直到齐。
+9. **`&[f32]` 进 wasm-bindgen import 参数是零拷贝 Float32Array 视图**（指向 wasm 内存）。它只在"胶水绝不
+   回调 Rust"的前提下安全 —— 回调会让内存增长、视图失效。`audio_pump.js` 目前只做 JS 侧分配与
+   `postMessage`（结构化克隆在调用内同步取快照），成立；哪天要回调就得改成先拷一份。
+10. **native 与 web 的"欠载"单位不同，不要硬凑成一个数**。cpal 回调按样本要数 ⇒ `underrun_samples`；
+    WebAudio 按帧记 ⇒ `underrun_frames`。`AudioBus::underrun_units()` 返回各自单位（判据一致：稳态不涨），
+    设备换没换、通路是 worklet 还是 script-processor 留在 `describe()` 的一行文字里。曾试过 `if cfg!(…)`
+    在两个不同 typed `PumpStats` 字段间选一个 —— 两个分支都要过类型检查，编不出来，改成各 pump 自己
+    实现 `underrun_units()`。
+11. **`cargo xtask check-all` 从三组变四组**：新增 `wasm32 --no-default-features --features web,ogg,mp3,wav,midi`
+    （音频解码面在 wasm 上必须绿，而默认 `web` 组不含解码 feature，覆盖不到 `play_midi` 这类门控 API）。
+    `xtask web` 同步换成 `WEB_AUDIO_FEATURES`，否则浏览器上的音频 demo 会缺解码后端。
+12. **worklet 的缓冲深度账不能双扣，静音不算消耗**。第一版 `applyWorkletStats` 既从 `workerPending`
+    里减、又加进 `workerConsumed`，而 `bufferedFrames()` 报的是两者之差 ⇒ 播一帧扣两帧；处理器那边
+    又是 `this.consumed += n`（取不到数据的静音帧也计）⇒ 上下文刚 running 时深度直接做负。
+    浏览器上看到的形态很骗人：`underrun` 冻结在启动值、`buffered` 忽 0 忽 -1024，而**真实排队长度一路
+    涨**（延迟跟着涨，闭环永不收敛）。改成只留 `workerPending` 一个在途量 + 处理器分开报 `played`
+    （真取走的帧）和 `silent`（只进 underrun），并在 `silent >= 512` 时也回报一次，免得全静音期间
+    主线程收不到任何消息。这类账 Rust 单测碰不到，只能靠控制台那行 `buffered=`/`underrun=` 复验。
+13. **`WORKLET_SRC` 是模板字符串 ⇒ 注释里不能写反引号**。修账时随手写的 `` `played - acked` `` 当场
+    截断了模板，JS 语法直接坏掉而 cargo 一侧毫无感觉（胶水不参与编译检查）。防线：
+    `node --check crates/sisf-audio/src/audio_pump.js`（几毫秒，能抓住模板截断/引号失衡）。
+
 
 ## T8 动画 + MoveRoute + 固定 tick
 - [ ] `sisf-sprite/src/anim.rs`：`AnimDef{ frames:[FrameDef{rect,dur_ms}], loop_: Once|Pingpong|Loop{n}, pattern: Option<DirPattern> }`、`AnimState{def,speed,index,paused}`、`DirPattern::RpgMaker4x3`（MV，`dir + 3*step`）/ `RpgMaker2x2`（VX/Ace）。验收：两图样帧索引单测（下/左/右/上四向）。
@@ -242,3 +300,5 @@ T3 追加（只加 feature，不加新 crate）：`web-sys` 开 `Performance` �
 T4 追加（按 DoD-3 登记，均为设计 §依赖清单已验证版本）：`[workspace.dependencies]` 新增 `png 0.18.1`、`jpeg-decoder 0.3.2`、`image-webp 0.2.4`、`gif 0.14.2`、`turbojpeg 1.5.1`（仅非 wasm target 可见，`simd-jpeg` 用）；`web-sys` 追加 `Response` feature（wasm fetch）。crate 间新增 feature 边：`sisf-media/image`（png+jpeg+webp）与 `sisf-media/gif`、`sisf-media/simd-jpeg`（换 turbojpeg）、`sisf-asset/{image,gif,web}`（`web` = wasm fetch provider）、`sisf-render/image`（默认开，图集/上传需要）；门面把 `image` 并入 `native`/`web` 两条主线（图像解码是引擎核心能力）。`xtask web` 构建后把 `crates/sisf-media/tests/fixtures/` 拷进 `web/assets/img/` 供 wasm fetch。图像 fixture（真实 PNG/JPG/WebP/BMP/GIF 小图）入仓在 `crates/sisf-media/tests/fixtures/`。T4 执行时发现：钉版名 `rect-packer` 有误，crates.io 包名是 **`rect_packer`**（下划线），T1 因无人引用未暴露——`[workspace.dependencies]` 已改名。
 
 T6 追加（按 DoD-3 登记）：`[workspace.dependencies]` 新增 `cosmic-text 0.19.0`（T6 清单点名的版本；`etagere 0.3.0` 早在 T1 就钉了，本阶段才第一次被使用）。`crates/sisf-text` 新增依赖边 `wgpu`（自管 `R8Unorm` 覆盖率页，不复用 `sisf-render` 的 sRGB 页）、`thiserror`，dev-dependencies `png` + `pollster`（golden 自己写基线、读回要阻塞 poll）—— 与 `sisf-sprite` 的 golden 依赖面一致，都不进运行时依赖。**没有新增 crate 间 feature 边**：门面本就无条件依赖 `sisf-text`。字体资源：`Inter-Regular.ttf`（SIL OFL 1.1，许可证随文件同目录）入仓两份 —— `crates/sisf-text/tests/fixtures/`（单测 + golden 用，Inter 只有拉丁）与 `web/assets/`（wasm 手测，已追加进 `web/assets/manifest.txt` 供预取）。T6 副作用：图集装箱加 1px 复制 gutter，`crates/sisf-sprite/tests/golden/sprite_scene.png` 基线重写（渗色消失，语义断言未改）；`xtask golden` 从单场景改为遍历 `GOLDENS` 表（`sisf-sprite/golden_sprite` + `sisf-text/golden_text`），任一失败即返回其退出码。
+
+T7 追加（按 DoD-3 登记）：**没有新增 crate**，钉版清单里的音频六件全部按原版本接线 —— `symphonia 0.6.1`（`default-features = false`，按 `ogg/vorbis/mp3/wav/pcm` 逐条开）、`lewton 0.10.2`（只在 `ogg-lewton`，默认关）、`lofty 0.25.4`、`midly 0.5.3`、`rustysynth 1.3.6`、`cpal 0.18.2`。两条上游坑登记在此：`lofty` **必须保留默认 feature `id3v2_compression_support`**（0.25.4 关掉它会留下未导入的 `Id3v2Error*`，编译直接失败，见根 `Cargo.toml` 注释）；`midly` 用 `default-features = false, features = ["std"]`（不要它的 `alloc`/wasm 附加面）。新增 feature 边：`sisf-audio/{native,web,ogg,mp3,wav,midi}`（`web = ["dep:wasm-bindgen"]`，**`js-sys` 试过又删了** —— 胶水返回普通 `Array`、Rust 侧 `Vec<f64>` 就够，留着就是清单外死依赖），以及门面 `sisf/{ogg,mp3,wav,midi}` 现在**同时**转发 `sisf-media/*` 与 `sisf-audio/*`。`sisf-audio` 两条 pump feature 互斥且各自带 `target_arch` 条件（`native` 只在非 wasm32、`web` 只在 wasm32），都没开时该 crate 只剩 `mixer` —— 没有设备通路就没有 `AudioBus`，这是 DoD-4 的刻意形状而不是空壳。音频 fixture（`tone_2s.ogg`/`tone_1s.wav`/`tone_1s.mp3`/`jingle.mid`）在 `crates/sisf-media/tests/fixtures/` 存一份、`web/assets/` 拷一份（已进 `manifest.txt`）；**SoundFont 不进仓**（体积 + 授权），`xtask check-all` 相应加第四组 `wasm32 --no-default-features --features web,ogg,mp3,wav,midi`，`xtask web` 的构建 feature 换成 `WEB_AUDIO_FEATURES`。

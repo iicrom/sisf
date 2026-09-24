@@ -11,6 +11,11 @@ png = { workspace = true, optional = true }
 jpeg-decoder = { workspace = true, optional = true }
 image-webp = { workspace = true, optional = true }
 gif = { workspace = true, optional = true }
+symphonia = { workspace = true, optional = true }
+lewton = { workspace = true, optional = true }
+lofty = { workspace = true, optional = true }
+midly = { workspace = true, optional = true }
+rustysynth = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 turbojpeg = { workspace = true, optional = true }
@@ -22,9 +27,16 @@ image = ["dep:png", "dep:jpeg-decoder", "dep:image-webp"]
 gif = ["dep:gif"]
 # 启用：jpeg 解码换 turbojpeg（native only，T4；wasm target 上该包不可见）
 simd-jpeg = ["image", "dep:turbojpeg"]
-# 占位 feature：对应解码依赖在 T7（音频/MIDI）、T11（视频）阶段接线
-ogg = []
-mp3 = []
-wav = []
-midi = []
+# --- T7 音频：解码后端 = symphonia（纯 Rust，四端通用），循环点 = lofty 读元数据 ---
+# 每条 feature 都单独拉 symphonia 的对应子 crate，避免 `--no-default-features` 下
+# 把全套编解码器（aac/flac/mkv…）拖进 wasm 体积。`pcm` 是 WAV 的编解码器，必须一起开。
+ogg = ["dep:symphonia", "symphonia/ogg", "symphonia/vorbis", "symphonia/pcm", "dep:lofty"]
+mp3 = ["dep:symphonia", "symphonia/mp3", "symphonia/pcm", "dep:lofty"]
+# aiff 与 wav 同属 RIFF 容器，symphonia 的 `wav` feature 已覆盖
+wav = ["dep:symphonia", "symphonia/wav", "symphonia/pcm", "dep:lofty"]
+# OGG 回退解码器（symphonia 出问题时用；默认关闭，见 audio/lewton.rs）
+ogg-lewton = ["dep:lewton"]
+# MIDI：midly 解析 SMF + rustysynth 的 SF2 合成器（引擎不带 SoundFont，见 midi.rs）
+midi = ["dep:midly", "dep:rustysynth"]
+# 占位 feature：对应解码依赖在 T11（视频）阶段接线
 video = []

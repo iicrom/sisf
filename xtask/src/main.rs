@@ -1,7 +1,8 @@
 //! xtask：仓库统一构建/验证入口（`cargo xtask <子命令>`）。
 //!
 //! 子命令：
-//! - `check-all`  三端 feature 组合 `cargo check`（win `--all-features` / wasm32 `web` / android `native`）
+//! - `check-all`  feature 组合 `cargo check`（win `--all-features` / wasm32 `web` / android
+//!   `native` / wasm32 `web+全部解码链`，见 `WEB_AUDIO_FEATURES`）
 //! - `fmt`        `cargo fmt --all`（附加 `--check` 透传）
 //! - `clippy`     workspace clippy（win + wasm，`-D warnings`）
 //! - `web`        构建 wasm 示例（`cargo xtask web [示例名]`，缺省 `hello_window`）+ wasm-bindgen + 本地静态服务
@@ -18,6 +19,12 @@ use std::process::{Command, exit};
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
 const ANDROID_TARGET: &str = "aarch64-linux-android";
 const WEB_PORT: u16 = 8080;
+/// `cargo xtask web` 给 wasm 示例编的 feature 组合：平台 + T7 的四条解码链。
+///
+/// 为什么带上解码：`--features web` 单开时 `play_bytes` 一律 `UnsupportedFormat`，
+/// 浏览器里就变成"看着动、听着没声"，`audio_demo` 的听测没法做。SoundFont 引擎不附带
+/// （`midi` 只影响能否解 `.mid`，见 `docs/audio.md`）。
+const WEB_AUDIO_FEATURES: &str = "web,ogg,mp3,wav,midi";
 /// 离屏 golden 测试清单：`(crate, 测试文件)`，`cargo xtask golden` 逐个跑。
 const GOLDENS: &[(&str, &str)] = &[
     ("sisf-sprite", "golden_sprite"),
@@ -158,6 +165,20 @@ fn check_all() -> i32 {
                 "native",
             ],
         ),
+        (
+            "wasm32 音频全开(ogg/mp3/wav/midi)",
+            vec![
+                "check",
+                "-p",
+                "sisf",
+                "--all-targets",
+                "--target",
+                WASM_TARGET,
+                "--no-default-features",
+                "--features",
+                WEB_AUDIO_FEATURES,
+            ],
+        ),
     ];
     for (label, args) in combos {
         println!("---- check-all: {label} ----");
@@ -216,7 +237,7 @@ fn web(example: &str) -> i32 {
         WASM_TARGET,
         "--no-default-features",
         "--features",
-        "web",
+        WEB_AUDIO_FEATURES,
     ]);
     if code != 0 {
         return code;

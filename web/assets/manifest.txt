@@ -3,3 +3,7 @@ img_80x60.jpg
 img_40x40.webp
 img_24x18_24bpp.bmp
 Inter-Regular.ttf
+tone_2s.ogg
+tone_1s.wav
+tone_1s.mp3
+jingle.mid

@@ -18,22 +18,23 @@ sisf-rpgmk = { workspace = true, optional = true }
 
 [features]
 default = ["native"]
-# 启用：sisf-app/native（winit 桌面+Android 窗口；T7 cpal、T9 gilrs 挂这里）+ 图像解码
-native = ["sisf-app/native", "image"]
-# 启用：sisf-app/web（wasm-bindgen + WebAudio(T7) + fetch VFS(T4)）+ 图像解码
-web = ["sisf-app/web", "sisf-asset/web", "image"]
+# 启用：sisf-app/native（winit 桌面+Android 窗口；T9 gilrs 挂这里）+ 图像解码 + cpal 输出
+native = ["sisf-app/native", "sisf-audio/native", "image"]
+# 启用：sisf-app/web（wasm-bindgen + WebAudio pump(T7) + fetch VFS(T4)）+ 图像解码
+web = ["sisf-app/web", "sisf-asset/web", "sisf-audio/web", "image"]
 # 启用：图像解码链（sisf-media/{png,jpeg-decoder,image-webp} + 手写 BMP）与图集/上传（T4）
 image = ["dep:sisf-media", "sisf-media/image", "sisf-asset/image", "sisf-render/image"]
 # 启用：sisf-media/gif → gif crate，多帧→AnimDef（T4）
 gif = ["dep:sisf-media", "sisf-media/gif", "sisf-asset/gif"]
 # 启用：sisf-media/ogg → symphonia ogg+vorbis（T7）
-ogg = ["dep:sisf-media", "sisf-media/ogg"]
+ogg = ["dep:sisf-media", "sisf-media/ogg", "sisf-audio/ogg"]
 # 启用：sisf-media/mp3 → symphonia mp3（T7）
-mp3 = ["dep:sisf-media", "sisf-media/mp3"]
+mp3 = ["dep:sisf-media", "sisf-media/mp3", "sisf-audio/mp3"]
 # 启用：sisf-media/wav → symphonia wav（T7）
-wav = ["dep:sisf-media", "sisf-media/wav"]
-# 启用：sisf-media/midi → midly + rustysynth（T7）
-midi = ["dep:sisf-media", "sisf-media/midi"]
+wav = ["dep:sisf-media", "sisf-media/wav", "sisf-audio/wav"]
+# 启用：sisf-media/midi → midly + rustysynth（T7）。**必须**透传给 sisf-audio：
+# `AudioBus::play_midi` 就门控在它自己的 `midi` 上，只开 sisf-media 会连方法都看不见。
+midi = ["dep:sisf-media", "sisf-media/midi", "sisf-audio/midi"]
 # 启用：sisf-media/video → native ffmpeg-next / web video 胶水（T11 桩）
 video = ["dep:sisf-media", "sisf-media/video"]
 # 启用：sisf-app/inspector → egui 调试面板（T12）
@@ -54,3 +55,10 @@ path = "../../examples/sprite_bench.rs"
 [[example]]
 name = "windows"
 path = "../../examples/windows.rs"
+
+[[example]]
+name = "audio_demo"
+path = "../../examples/audio_demo.rs"
+# 三条解码链齐了才编：示例要把 fixture 一次性解码成驻留样本（见文件头的"解码一次"），
+# 少了任何一条那份 fixture 就解不出来。`cargo check --all-targets` 会自动跳过它。
+required-features = ["ogg", "mp3", "wav"]

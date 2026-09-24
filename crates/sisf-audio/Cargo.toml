@@ -6,5 +6,24 @@ license.workspace = true
 description = "纯 Rust 混音器（BGM/BGS/ME/SE）+ native/web 设备 pump"
 
 [dependencies]
-sisf-asset.workspace = true
 sisf-media.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cpal = { workspace = true, optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { workspace = true, optional = true }
+
+[features]
+# 不设 default：混音器本身四端通用，设备 pump 由 App 侧 feature 决定。
+default = []
+# native 输出设备（cpal：WASAPI/CoreAudio/ALSA/AAudio）
+native = ["dep:cpal"]
+# wasm 输出设备（AudioWorklet + ScriptProcessor 回退，胶水见 src/audio_pump.js）
+web = ["dep:wasm-bindgen"]
+# 解码 feature 透传：应用只需要开 sisf/{ogg,mp3,wav,midi}，不必点到 sisf-media
+ogg = ["sisf-media/ogg"]
+mp3 = ["sisf-media/mp3"]
+wav = ["sisf-media/wav"]
+midi = ["sisf-media/midi"]
