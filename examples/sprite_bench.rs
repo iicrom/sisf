@@ -196,7 +196,7 @@ impl Sources {
         // 在飞任务的结果靠 `poll_ready` 结清票据；句柄统一从 `get` 领（见下）。
         for (_id, req) in self.store.poll_ready(&mut self.runner) {
             if let Request::Failed(e) = req {
-                println!("[sprite_bench] 解码失败（已缓存，需 retry）: {e}");
+                platform::log_info(&format!("[sprite_bench] 解码失败（已缓存，需 retry）: {e}"));
             }
         }
         for (i, name) in SOURCES.iter().enumerate() {
@@ -205,6 +205,14 @@ impl Sources {
             {
                 fresh |= self.adopt(i, h);
             }
+        }
+        if fresh {
+            platform::log_info(&format!(
+                "[sprite_bench] 第 {now} 帧: 图源 {}/{} 就绪（页={}）",
+                self.loaded(),
+                SOURCES.len(),
+                self.atlas.live_pages(),
+            ));
         }
         fresh
     }
@@ -263,7 +271,7 @@ fn prefetch(manifest: &Arc<WebManifest>) {
                     wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(&url)).await?;
                 // `array_buffer()` 本身是 `catch` 绑定：返回 `Result<Promise, JsValue>`。
                 let body = web_sys::Response::from(response).array_buffer()?;
-                Ok(wasm_bindgen_futures::JsFuture::from(body).await?)
+                wasm_bindgen_futures::JsFuture::from(body).await
             }
             .await;
             match outcome {
@@ -364,8 +372,9 @@ impl Bench {
     }
 
     /// `avg/min/max` + 页数/batch/slot 数（"合并成一次 draw"的直观证据）。
+    /// 用 `platform::log_info` 而非 `println!`：后者在 wasm32-unknown-unknown 上静默丢弃。
     fn line(&self, tag: &str, avg: f64, min: f64, max: f64) {
-        println!(
+        platform::log_info(&format!(
             "[sprite_bench] {tag} 帧 {} {}x{} sprites={} 图源 {}/{} 页={} batch={} \
              slot={} inst={} 期望 batch={:?} 帧时间 avg={:.2}ms({:.1}fps) min={:.2} \
              max={:.2} 累计掉帧(>{SLOW_MS:.0}ms)={}",
@@ -385,7 +394,7 @@ impl Bench {
             min,
             max,
             self.slow,
-        );
+        ));
     }
 
     fn report_window(&mut self) {
@@ -454,11 +463,11 @@ impl Bench {
             SOURCES.len()
         );
         self.asserted = true;
-        println!(
+        platform::log_info(&format!(
             "[sprite_bench] 合批断言通过: {} 张图源铺在 {pages} 页图集上，{} 个实例只有 batch={expect}",
             SOURCES.len(),
             stats.instances,
-        );
+        ));
     }
 }
 
@@ -591,10 +600,10 @@ pub fn main() {
 
 fn real_main() {
     let (frames, sprites) = bench_args();
-    println!(
+    platform::log_info(&format!(
         "[sprite_bench] 启动 sprites={sprites} limit={frames} 图源={:?}",
         SOURCES
-    );
+    ));
     let mut app = Bench::new(sprites);
     app.limit = frames;
     if let Err(e) = platform::run(app, config()) {

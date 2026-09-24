@@ -32,7 +32,8 @@ pub(crate) fn log_error(msg: &str) {
 }
 
 /// 常规信息（选中了哪个 adapter 之类）：桌面走 stdout，wasm 走 console。
-pub(crate) fn log_info(msg: &str) {
+/// 也是示例/上层在 wasm 下唯一的可见输出通道（`println!` 在该 target 是静默丢弃）。
+pub fn log_info(msg: &str) {
     #[cfg(all(target_arch = "wasm32", feature = "web"))]
     web_sys::console::log_1(&msg.into());
     #[cfg(not(all(target_arch = "wasm32", feature = "web")))]

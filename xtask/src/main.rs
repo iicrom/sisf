@@ -139,6 +139,7 @@ fn clippy() -> i32 {
         "clippy",
         "-p",
         "sisf",
+        "--all-targets",
         "--target",
         WASM_TARGET,
         "--no-default-features",
