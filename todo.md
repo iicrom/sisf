@@ -177,12 +177,14 @@
 - [x] `pump_web.rs` + ~~`web/audio_worklet.js`~~（落地成 `crates/sisf-audio/src/audio_pump.js` 内联 Blob，见下第 6 条）：`AudioWorklet`（不可用则 `ScriptProcessor`）从 WASM 拉混音输出；`AudioBus::suspend/resume` 绑 visibilitychange + 首次点击解锁。验收：Chrome-wasm 播 BGM/SE，`docs/audio-web.md` 记延迟实测（目标 ≤~21ms@1024）。→ 编译面绿：`cargo xtask check-all` 新增的第四组 `wasm32 --no-default-features --features web,ogg,mp3,wav,midi`（含 `--all-targets`，即示例本身）0 warning。通路选择/解锁/延迟口径写成 `docs/audio-web.md`。这一行浏览器真实读数（`state=running kind=worklet worklet=yes baseLatency=0.0100s outputLatency=0.0400s`）反过来暴露了两个只有看数才会发现的 pump 缺陷，修完的可复现证据是
 `node crates/sisf-audio/tests/pump_bookkeeping.mjs`（把胶水连同 `WORKLET_SRC` 里**真实的**处理器
 一起装进 node 跑 48k 虚拟时间线；判据 = 报的深度 == 真实排队量 ±1 quant、不为负、预热后
-`underrun` 不涨、60fps 深度恰为 1024）：fps=60 1024~1120f 21.3~23.3ms err 2f +0 / 50 +0 /
-42 1280~1440 +0 / 30 1920~2080 +0 / 20 2880~3040 +0；反例（修账前的胶水放同一位置）
+`underrun` 不涨、60fps 深度恰为 1024、两条拆账恒等式 `queued`==真实排队量 与
+`buffered-真实==inflight`）：fps=60 峰值 1024~1120f 21.3~23.3ms 低水位 128f queued 误差 0.5f +0 /
+50 +0 / 42 1280~1440 +0 / 30 1920~2080 +0 / 20 2880~3040 +0；反例（修账前的胶水放同一位置）
 `FAIL 最大差 238507 帧`。见下第 12、14 条。人工复验**已做**（用户硬刷新 + 点击，我从页面里直接采
 `sisfAudioStats()`）：`state=running kind=worklet`，稳态 `buffered=1024~1280f`（=21.3~26.7ms，
 合计 68.7ms 里 42ms 是 `baseLatency 10ms + outputLatency 32ms`），`buffered` 全程不为负 ⇒ 实测表
-两列已填。残余是主线程长尾不是账错，见下第 15 条。
+两列已填。残余已定量（ack 回报 `queued` + 2ms 采水位）：是 ~3 个 quant 的**在途窗口**、只在 >25ms 的
+主线程长帧上被击穿，不是账错，见下第 15 条。
 - [x] `sisf-media/src/midi.rs`（feature `midi`）：`midly 0.5.3` 解析 + `rustysynth 1.3.6` SF2 合成，`SoundBank::from_sf2(&[u8])` 经 VFS（**引擎不附带 SoundFont**），MIDI 作为一路 Voice 参与同一 Mixer。验收：给定用户 SF2 时播放 fixture `.mid`；无 SF2 返回 `MissingSoundBank` 并提示（不 panic）；文档给出"离线把 .mid 预渲染成 .ogg"退路。→ `midi::tests` 9 项（`midi_info` 轨数/时长、`MidiDecoder` 定长读、`seek_sample(0)` 回绕、循环类型分派、无 bank ⇒ `MissingSoundBank`；其中 2 项需要用户素材，做成 env 开关：`SISF_SF2=/path/to/bank.sf2 cargo test -p sisf-media --features midi -- --ignored`，断"同参数两次渲染逐位一致"与"内部循环模式永不结束、只在 0 处回绕"）+ 真机两遍：demo 的 `M` cue 打出 `缺少 SoundFont（SF2）: …或离线把 .mid 预转成 .ogg`，通道状态不变、不 panic。SF2 那条只能由用户自备素材自证（仓库故意不存，退路命令在 `docs/audio.md`）。
 - [x] `examples/audio_demo.rs`：BGM 循环 + `Space` 播 SE + `M` 播 `.mid`（键盘事件本阶段还没有，改成确定性时间线驱动同一套 `fire()`，见下第 8 条）。验收：`cargo xtask check-all` 含 `--features midi` 组合绿。→ 示例注册带 `required-features = ["ogg","mp3","wav"]`，故 web-only / native-only 两组是**跳过**而不是失败；`xtask web` 构建 feature 从 `web` 改成 `WEB_AUDIO_FEATURES = "web,ogg,mp3,wav,midi"`。四份 fixture 已进 `web/assets/manifest.txt`。
 - 验收（整段）：mixer 单测 + Win/Chrome 听测 → 提交 `P6 audio+ogg/mp3/wav+midi`。落地说明见 `docs/audio.md`（四层与 feature 边界、通道模型与循环默认值、三个容器三种循环点读法、native 主线程混音 + SPSC 环、MIDI 三档兜底、能力/平台矩阵、两个真坑）+ `docs/audio-web.md`（worklet 与 ScriptProcessor 的语义差、深度记账与帧率阈值两节、延迟口径、手测步骤与实测表）。→ 已提交 **`3ef3c66`**：`cargo test -p sisf-audio --all-features` **34 绿**（mixer 19 + bus 8 + pump_native 7）+ `cargo test --workspace --all-features` 全绿 0 红（2 项 `SISF_SF2` ignored）+ `cargo xtask check-all` 四组 0 warning + `cargo xtask clippy`（win + wasm，`-D warnings`）+ `cargo xtask fmt --check` 净 + `node --check` 与上面那条 node 侧契约测试 + Windows 真设备有界复跑（第 4 条那行）。⚠️ 整段验收还差两件人工：Win 播放中切默认输出端点/插拔耳机（判据 `streams` 1→2）；这两听之外，Chrome 侧的"缺口是否可闻"也只能由耳朵定 —— 若可闻就把 `TARGET_FRAMES` 抬到 1536（可控延迟 21.3→32ms，见 `docs/audio-web.md` 的定价段）。
@@ -259,17 +261,20 @@
     次调用看得见就会退化成每 rAF 只补 256 帧的一个 block，实测 `want=2048 pushed=1024` 仍欠载），所以
     JS 里存了 `catchUpFrames`；② 判据用 `refill_samples(2286, cap) > 2286` 这种"一帧 30fps 也补得回来"
     的形状断言，别只断"等于 TARGET"。
-15. **浏览器上的残余 `underrun` 只定性了一半，别急着当成"预算不够"**。修账后每 rAF 采一次
-    `sisfAudioStats()`（同 URL 动态 import ⇒ 同一个模块实例），8s / 681 tick：帧时长 p50 12ms、
-    p99 25ms、max 28ms，**8 个 tick 有增量、其余 673 个全零，且每个增量都是 384 帧**。
-    已测清的：与第 12 条那种双扣无关（深度全程贴目标、不为负、只在 >20ms 的 tick 上缺）。
-    没测清的：缺口**不随 dt 增长**（21.6ms 与 28.0ms 的长帧各缺 3 个 quant），这更像
-    `bufferedFrames()` 把"已 `postMessage`、处理器还没收到"的在途帧也算成可用深度。
-    node 里加探针能造出这个形态（`--transit 1`：60fps 稳、50fps 起结构性欠载，报的深度比可取的多
-    ~900f），但浏览器里它占多大比重要等 ack 带上 `queued`（处理器自己队里的真实剩余）才量得出来。
-    两种改法都是**拿延迟换保险**（抬 `TARGET_FRAMES` 到 1536 = 32ms，或先在 ack 里测真实深度再定预算），
-    而清单钉的是"≤~21ms@1024" ⇒ 本阶段保留 1024，把这条挂成待决，不偷偷改延迟契约。
-    native 侧无此纠结（cpal 线程不抖，13s `underrun+0`）。
+15. **浏览器上的残余 `underrun` 是"在途窗口"，不是记账错，也不是按比例预算不足**。先采到形态：每
+    rAF 采一次 `sisfAudioStats()`（同 URL 动态 import ⇒ 同一个模块实例），8s / 681 tick：帧时长 p50
+    12ms、p99 25ms、max 28ms，**8 个 tick 有增量、其余 673 个全零，且每个增量都是 384 帧**。缺口
+    *不随 dt 增长* ⇒ 不像预算，像某个固定量被错算成了可用深度。于是让处理器随 ack 报回自己队里的
+    真实剩余（`drain{..., queued}`，槽 10/11 = `queued`/`inflight`，控制台那行同步打印），再按 2ms
+    采样把水位量出来：9s / 774 tick，`queued` 低水位均值 376f、高水位均值 **760f**，而同一时刻报的
+    `buffered` 峰值 ~1150f —— 差的 **390f ≈ 3 个 quant ≈ 8ms 正等于那个恒定的 384 帧**。含义：
+    `postMessage` 出去、处理器还没拿到（拿到到可见之间又播掉一点）的帧被算进了可用深度，补给一慢，
+    处理器先把**看得见的**吃完，缺口长度就等于这笔在途量。记账本身是对的（两条恒等式在 node 里
+    ≤1.5f：`queued` == 真实排队量、`buffered - 真实 == inflight`），复现形态要靠探针
+    `--transit 1`（60fps 稳、50fps 起结构性欠载）与 `--transit 3`（60fps 就崩）。
+    定价：改需求阈值为按 `queued` 与把 `TARGET_FRAMES` 抬到 1536 **在延迟上等价**（都要多囤 ~8ms），
+    而清单钉的是"≤~21ms@1024" ⇒ 本阶段保留 1024，把"长帧（>25ms，这里是 WARP 软件渲染）上每次缺
+    8ms"如实记成待决，不偷偷改延迟契约。native 侧无此纠结（cpal 线程不抖，13s `underrun+0`）。
 
 
 ## T8 动画 + MoveRoute + 固定 tick

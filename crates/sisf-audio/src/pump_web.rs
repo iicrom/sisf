@@ -42,6 +42,8 @@ pub const BLOCK_FRAMES: usize = 256;
 pub const MAX_BLOCKS: usize = 16;
 
 /// `sisfAudioStats()` 定长表的槽位（与 `audio_pump.js` 的 `S_*` 常量一一对应）。
+/// JS 那边还有 10/11 两槽（处理器自报的 `queued` 与拆出来的 `inflight`），只给控制台和
+/// node 核算台看，这里不读。
 const S_RATE: u32 = 0;
 const S_BUFFERED: u32 = 1;
 const S_UNDERRUN: u32 = 2;

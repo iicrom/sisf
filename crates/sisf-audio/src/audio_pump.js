@@ -59,6 +59,10 @@ const S_BASE_LATENCY = 6;
 const S_OUTPUT_LATENCY = 7;
 const S_TARGET = 8;
 const S_TOTAL_LATENCY = 9;
+// 下面两个只给控制台与 node 核算台看（Rust 侧的 PumpStats 不读）：把"投递深度"拆成
+// 处理器可取的那部分与还在消息路上飞的那部分，见 inFlightFrames。
+const S_WORKER_QUEUED = 10;
+const S_IN_FLIGHT = 11;
 
 const WORKLET_SRC = `
 class SisfMixProcessor extends AudioWorkletProcessor {
@@ -67,6 +71,7 @@ class SisfMixProcessor extends AudioWorkletProcessor {
     this.chunks = [];
     this.off = 0;
     this.played = 0; // 真正从队列取走并输出的帧（静音不算）
+    this.received = 0; // 已收到、也就是曾经可取的总帧数（queued = received - played）
     this.acked = 0;
     this.silent = 0;
     this.quanta = 0;
@@ -74,9 +79,11 @@ class SisfMixProcessor extends AudioWorkletProcessor {
       const d = e.data;
       if (d.cmd === 'write') {
         this.chunks.push(d.chunk);
+        this.received += d.chunk.length / 2;
       } else if (d.cmd === 'flush') {
         this.chunks.length = 0;
         this.off = 0;
+        this.received = this.played; // 清空后"可取"归零，played 保持单调以便算增量
       }
     };
   }
@@ -117,8 +124,11 @@ class SisfMixProcessor extends AudioWorkletProcessor {
     // （实测仍欠载）。取走与静音任一非零就报，纯静音期也必须让主线程知道。
     const took = this.played - this.acked;
     if (took > 0 || this.silent > 0) {
+      // queued = 处理器此刻自己队里还剩多少帧（报的是发这条消息那一瞬的值，主线程看到它时
+      // 最多少算了一个 quant 的消耗）。有了它，主线程才能把"已投递的深度"拆成
+      // "可取的"与"还在消息路上飞的"，见主线程侧的 inFlightFrames。
       this.port.postMessage({ cmd: 'drain', frames: took, silent: this.silent,
-                              quanta: this.quanta });
+                              quanta: this.quanta, queued: this.received - this.played });
       this.acked = this.played;
       this.silent = 0;
       this.quanta = 0;
@@ -138,6 +148,7 @@ let head = 0; // 绝对样本游标（只增）
 let tail = 0;
 let port = null;
 let workerPending = 0; // 已 postMessage、处理器还没取走的帧
+let workerQueued = 0; // 处理器自己报的"队里还剩多少"（陈旧度 ≤ 一个 quant）
 let consumedSinceQuery = 0; // 上次 `sisfAudioFramesNeeded` 之后被取走的帧
 let catchUpFrames = 0; // 上一条里搬过来的"这一帧要播掉的量"，整个 tick 内保持一致
 let workerUnderrun = 0;
@@ -185,10 +196,24 @@ function bufferedFrames() {
   return ringFilledSamples() / 2 + (kind === 'worklet' ? workerPending : 0);
 }
 
+/// 处理器**现在就能取**的帧数（不含还在消息路上的、也不含环里的 —— 那两类都要等下一次
+/// `sisfAudioPush` 的批发才对它可见）。用它把 `bufferedFrames()` 拆开看，才能回答
+/// "缺的那 384 帧到底是在途还是预算不够"，见 `docs/audio-web.md`。
+function queuedFrames() {
+  return kind === 'worklet' ? workerQueued : ringFilledSamples() / 2;
+}
+
+/// 已投递但对处理器还不可见的帧数。
+function inFlightFrames() {
+  return Math.max(0, Math.round(bufferedFrames() - queuedFrames()));
+}
+
 /// 处理器回报：`frames` 帧已被它取走播出 ⇒ 从在途量里扣掉（只扣这一次），并记进"这一帧要补"。
 function applyWorkletStats(d) {
   workerPending -= Math.min(workerPending, d.frames);
   consumedSinceQuery += d.frames;
+  // 老浏览器/老胶水可能没带 queued ⇒ 保守地当成"全部已投递的都可见"。
+  workerQueued = typeof d.queued === 'number' ? d.queued : workerPending;
   workerUnderrun += d.silent;
   quanta += d.quanta;
 }
@@ -385,6 +410,8 @@ export function sisfAudioStats() {
   out[S_BASE_LATENCY] = ctx && ctx.baseLatency ? ctx.baseLatency * 1000.0 : 0.0;
   out[S_OUTPUT_LATENCY] = ctx && ctx.outputLatency ? ctx.outputLatency * 1000.0 : 0.0;
   out[S_TARGET] = TARGET_FRAMES;
+  out[S_WORKER_QUEUED] = queuedFrames();
+  out[S_IN_FLIGHT] = inFlightFrames();
   out[S_TOTAL_LATENCY] = rate > 0
     ? (out[S_BASE_LATENCY] + out[S_OUTPUT_LATENCY] + (buffered * 1000.0) / rate)
     : 0.0;
@@ -402,6 +429,9 @@ export function sisfAudioState() {
     bits.push('outputLatency=' + ctx.outputLatency.toFixed(4) + 's');
   }
   bits.push('buffered=' + bufferedFrames() + 'f');
+  // 把 buffered 拆开：queued = 处理器现在就能取的，inflight = 已投递但还看不见的。
+  bits.push('queued=' + Math.round(queuedFrames()) + 'f');
+  bits.push('inflight=' + inFlightFrames() + 'f');
   bits.push('underrun=' + workerUnderrun + 'f');
   bits.push('overflow=' + overflowSamples + 's');
   if (err) bits.push('err=' + err);
@@ -413,6 +443,7 @@ export function sisfAudioFlush() {
   tail = head;
   if (port) port.postMessage({ cmd: 'flush' });
   workerPending = 0;
+  workerQueued = 0;
   consumedSinceQuery = 0;
   catchUpFrames = 0;
   return 0.0;

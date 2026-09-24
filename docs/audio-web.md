@@ -106,12 +106,15 @@ python -m http.server 8080 -d web        # 必须 http://，file:// 下 wasm mod
 一行，其中 `describe()`（= `sisfAudioState()`）那段就是本页通路的状态：
 
 ```
-state=running kind=worklet worklet=yes baseLatency=0.0100s outputLatency=0.0400s buffered=1024f underrun=0f overflow=0s
+state=running kind=worklet worklet=yes baseLatency=0.0100s outputLatency=0.0400s buffered=1024f queued=760f inflight=264f underrun=0f overflow=0s
 ```
 
 判据（与 native 同一条）：稳态播放时 `underrun` 不涨、`kind` 是 `worklet`（若为
 `script-processor` 要查 `addModule` 为什么失败）、`state` 在点击后变 `running`、
 **`buffered` 不为负**（为负就是上面那笔账又记岔了）。
+`queued`/`inflight` 是把 `buffered` 拆开的两个观测量（处理器现在能取的 / 还在消息路上的，
+`buffered ≈ queued + inflight`），只用来诊断，Rust 侧的 `PumpStats` 不读它们；上面那对
+760/264 是下节实测的均值，不是某一次的读数。
 切到别的标签页应静音（`visibilitychange` → `ctx.suspend()`），切回来继续；
 `?secs=30` 可以让它跑久一点。GPU 那边若报"没有可用的 adapter"就再加 `&wgl`（WebGL2 回退）。
 
@@ -120,18 +123,18 @@ state=running kind=worklet worklet=yes baseLatency=0.0100s outputLatency=0.0400s
 | 环境 | 通路 | baseLatency | outputLatency | 排队 | 合计 | underrun |
 | --- | --- | --- | --- | --- | --- | --- |
 | Chrome / Windows，`?ex=audio_demo&wgl`（软件 GPU WARP），修账前 | worklet | 0.0100s | 0.0400s | **不可信**（双扣，见上节） | — | 11392f（t<1s 一次性，之后 68s 全程不涨） |
-| 同上，修账后（t≈85fps 稳态） | worklet | 0.0100s | 0.0320s | 1024~1280f = **21.3~26.7ms** | **68.7ms**（= 10 + 32 + 26.7） | 稳态每 tick 增量为 0；残余 ~384f/s（见下节，逐条对得上长帧） |
+| 同上，修账后（t≈85fps 稳态） | worklet | 0.0100s | 0.0320s | 1024~1280f = **21.3~26.7ms**（其中处理器可取的 `queued` 高水位只到 ~760f） | **68.7ms**（= 10 + 32 + 26.7） | 稳态每 tick 增量为 0；>25ms 的长帧每次缺 384f = 在途的 3 个 quant（见下节） |
 
 > **"排队"列就是引擎唯一可控的那一段**：合计 68.7ms 里有 42ms 是 Chrome/这块声卡的
 > `baseLatency + outputLatency`（`outputLatency` 还会随设备在 32~40ms 之间跳），与引擎无关。
 > 清单目标 ≤~21ms@1024 指的是可控那一段，修账后实测贴着 1024（=21.3ms）走，`buffered` 全程不为负。
 >
 > 这一行是直接从页面里取的：动态 import 胶水模块（与 bundle 同一个 URL ⇒ 同一个实例）后
-> `sisfAudioStats()`，每个 rAF 采一次，跑 8s。取数脚本见下节的"怎么复现"。
+> `sisfAudioStats()`，每个 rAF 采一次，跑 8s。取数脚本见下节开头。
 
 > 表里第一行是**真实控制台读数**，但它是在双扣那版上取的：`baseLatency`/`outputLatency`/通路/
-> 解锁/欠载只涨一次这几项照旧有效，`buffered` 那一列则被记账错误污染 ⇒ 合计延迟要等修账后的
-> 复现读数（DoD-1：不拿推算填表）。
+> 解锁/欠载只涨一次这几项照旧有效，`buffered` 那一列则被记账错误污染 ⇒ 合计延迟以第二行
+> （修账后的复现读数）为准（DoD-1：不拿推算填表）。
 >
 > 那 11392 帧（≈237ms）启动静音**不是 pump 的锅**：首次点击后 `examples/audio_demo.rs` 在主线程
 > 一次性解码四份 fixture（debug 构建下约 90ms/份，见 `docs/audio.md` 的"两个真坑"），pump 拿不到
@@ -146,14 +149,15 @@ state=running kind=worklet worklet=yes baseLatency=0.0100s outputLatency=0.0400s
 >
 > 它把胶水**连同 `WORKLET_SRC` 里的真实处理器源码**一起装进 node（不是复制一份模型），跑 48k
 > 虚拟时间线，判据是"报的深度 == 处理器真实排队量（误差 ≤ 一个 quant）+ 深度不为负 + 预热后
-> `underrun` 不再涨 + 60fps 下深度就是目标 1024 帧"。当前输出：
+> `underrun` 不再涨 + 60fps 下深度就是目标 1024 帧 + 两条拆账恒等式（`queued` == 真实排队量、
+> `buffered - 真实 == inflight`）"。当前输出：
 >
 > ```
-> ok  fps=60  深度 1024~1120f(21.3~23.3ms)  记账最大误差 2f    预热后 underrun +0
-> ok  fps=50  深度 1120~1280f(23.3~26.7ms)  记账最大误差 2.5f  预热后 underrun +0
-> ok  fps=42  深度 1280~1440f(26.7~30.0ms)  记账最大误差 3.5f  预热后 underrun +0
-> ok  fps=30  深度 1920~2080f(40.0~43.3ms)  记账最大误差 4.5f  预热后 underrun +0
-> ok  fps=20  深度 2880~3040f(60.0~63.3ms)  记账最大误差 6.5f  预热后 underrun +0
+> ok  fps=60  峰值深度 1024~1120f(21.3~23.3ms) 低水位 128f  queued 误差 0.5f  在途账误差 0.5f  underrun +0
+> ok  fps=50  峰值深度 1120~1280f(23.3~26.7ms) 低水位 96f   queued 误差 0.5f  在途账误差 0.5f  underrun +0
+> ok  fps=42  峰值深度 1280~1440f(26.7~30.0ms) 低水位 128f  queued 误差 1f    在途账误差 1f    underrun +0
+> ok  fps=30  峰值深度 1920~2080f(40.0~43.3ms) 低水位 256f  queued 误差 1.5f  在途账误差 1.5f  underrun +0
+> ok  fps=20  峰值深度 2880~3040f(60.0~63.3ms) 低水位 448f  queued 误差 1.5f  在途账误差 1.5f  underrun +0
 > ```
 >
 > 反例也验过：把修账前的胶水放到同一个位置跑，第一行就
@@ -164,59 +168,62 @@ state=running kind=worklet worklet=yes baseLatency=0.0100s outputLatency=0.0400s
 > 另一条防线：`node --check crates/sisf-audio/src/audio_pump.js`（`WORKLET_SRC` 是模板字符串，
 > 注释里写反引号会当场截断它，而 cargo 一侧毫无感觉 —— 修账时真踩过两次）。
 
-### 残余的 ~384 帧/秒：定性了一半，剩下的是定价问题
+### 残余的每 ~384 帧：测清了 —— 是"在途窗口"，不是记账错
 
-修账后的浏览器复验并没有把 `underrun` 压到绝对 0，但把它**定性了一半**：确实是长帧触发的、
-确实与记账双扣无关，剩下"为什么每次都恰好缺 384 帧"还没有在浏览器里定量。取数办法（不用手抄控制台，
-直接从页面里问胶水要数）：
+修账后 `underrun` 并没有压到绝对 0，剩一个常数缺口。为了不再靠猜，处理器现在随每次 ack 把自己的
+**真实剩余**报回来（`drain{..., queued}`），主线程把投递深度拆成两个可观测量：控制台那行与
+`sisfAudioStats()` 的槽 10/11 里的 `queued`（处理器现在就能取的）与 `inflight`（已 `postMessage`
+但还不可见的）。取数办法（不手抄控制台，直接问胶水要数）：
 
 ```js
-// DevTools Console：与 bundle 同 URL ⇒ 拿到的是同一个模块实例
+// DevTools Console：与 bundle 同 URL ⇒ 拿到的是同一个模块实例（<hash> 见 pkg/ 下的目录名）
 const mod = await import('/pkg/snippets/<hash>/src/audio_pump.js');
-const st = () => mod.sisfAudioStats();          // [rate, buffered, underrun, overflow, blocks, quanta, ...]
-let prev = st(), t0 = performance.now(), hits = [];
-for (;;) { await new Promise(r => requestAnimationFrame(r));
-  const t = performance.now(), s = st();
-  if (s[2] > prev[2]) hits.push([+(t - t0).toFixed(1), s[2] - prev[2], s[1]]);
-  prev = s; t0 = t; }
+const st = () => mod.sisfAudioStats(); // [.., 1=buffered, 2=underrun, 4=blocks, 10=queued, 11=inflight]
+const t0 = performance.now(); let p = st(), pt = t0, lo = p[10], hi = p[10], und = 0, dt = 0, n = 0;
+const ticks = [];
+const step = () => { const t = performance.now(), s = st(); und += s[2] - p[2]; dt += t - pt;
+  lo = Math.min(lo, s[10]); hi = Math.max(hi, s[10]);
+  if (s[4] !== p[4]) { if (n++ > 2) ticks.push([+dt.toFixed(1), und, lo, hi, s[1]]);
+    lo = s[10]; hi = s[10]; und = 0; dt = 0; }
+  p = s; pt = t; if (t - t0 < 9000) setTimeout(step, 2); else console.table(ticks.slice(-20)); };
+step();
 ```
 
-8 秒窗口的实测（Chrome / Windows / WARP，页面自身 ~85fps）：
+`setTimeout(…, 2)` 而不是 rAF 是有意的：rAF 只能落在补给之后，看不见一个 tick 之内水位怎么掉到 0。
+Chrome / Windows / WARP，9 秒窗口（774 个 tick）：
 
 | 量 | 读数 |
 | --- | --- |
-| tick 数 / 帧时长 p50 / p90 / p99 / max | 681 / 12.0 / 15.0 / 25.0 / **28.0** ms |
-| 时长 >20ms 的 tick | 24 |
-| 出现 `underrun` 增量的 tick | **8**（增量都是 384f） |
-| 时长 ≤20ms 的 tick 的增量 | **0**（673 个 tick 全零） |
-| 增量时刻的报出深度 | 1280f |
+| tick 时长 均值 / max | 11.6ms / 30.8ms |
+| 处理器可取深度 `queued` 低水位均值 | 376f（7.8ms） |
+| 处理器可取深度 `queued` 高水位均值 | **760f（15.8ms）** |
+| 同时刻报出的投递深度 `buffered` 峰值 | ~1150f（24ms） |
+| 出现增量的 tick | 4 个，增量 384/384/512/512f，**低水位全是 0f**，时长全 ≥25.9ms |
+| 时长 ≤20ms 的 tick | 增量全零 |
 
-对得上的算术（以及一个**还没在浏览器里定量**的偏差）：`TARGET_FRAMES = 1024` 就是 **21.3ms 的
-预算**，一个 tick 不超过它就不会缺；超过就缺一点。但浏览器上**缺的量不随 dt 变** —— 21.6ms 与
-28.0ms 的长帧各缺 **384 帧 = 3 个 quant = 8ms**。若是单纯的"预算不够按比例扣"，缺口应当随 dt
-增长；恒定值指向另一件事：`bufferedFrames()` 把**已经 `postMessage`、处理器却还没收到**的帧也算成
-可用深度。
-
-这条在 node 里能量出来（探针，默认关掉）：
+算术正好闭合：`buffered` 峰值 1150 减去 `queued` 高水位 760 = **390f ≈ 3 个 quant ≈ 8ms** —— 就是
+每次长帧上恒定的那个缺口。所以那 384 帧**既不是双扣也不是按比例预算不足**，而是"已经交出去、处理器
+还没拿到（拿到的那几瞬又已经播掉）"的在途量被算进了可用深度：补给一慢，处理器先把看得见的吃完，
+在途的那 3 个 quant 要等投递落地才可见，缺口于是**长度恒定**。node 侧的独立对照（同一份胶水 +
+同一份处理器源码）：
 
 ```
-node crates/sisf-audio/tests/pump_bookkeeping.mjs --transit 1   # 主线程→处理器的消息延迟 1 个 quant
+node crates/sisf-audio/tests/pump_bookkeeping.mjs                # 默认：投递同步，五条 fps 全 ok
+node crates/sisf-audio/tests/pump_bookkeeping.mjs --transit 1    # write 方向推迟 1 个 quant
+node crates/sisf-audio/tests/pump_bookkeeping.mjs --transit 3
 ```
 
-它把 write 方向的投递推迟一个 render quantum（ack 方向照旧同步），于是"报的深度"与"处理器真实可取
-的深度"分开：60fps 下仍稳（残留 255f > 0，只缺一次 128f），**50fps 起结构性欠载**
-（`FAIL fps=50 transit=1q: 预热后 underrun 又涨了 12800 帧`，报的深度比可取的多 ~900f）。
-也就是说"把在途帧当可用深度"这个建模误差是真实存在的，量级 ≈ 一个 tick 的出货量。
+默认模式下两条恒等式都成立（`queued` 与真实排队量最大差 ≤1.5f、`buffered - 真实 == inflight`），
+证明**记账是对的**；一旦给投递加延迟，缺口就复现 —— transit=1 时 60fps 仍稳但
+`FAIL fps=50: 预热后 underrun 又涨了 12800 帧，低水位 0f`，transit=3 时连 60fps 都撑不住。
+浏览器实际在途 ≈3 个 quant，而 `TARGET_FRAMES = 1024` 相对一个 tick 的消耗只留了 ¼ 的余量
+（60fps 下 ≈200f < 384f），所以只有长帧会把它击穿。
 
-但**不能就此断言浏览器的 384 帧就是它**：若浏览器真有这么大的在途，681 个 tick 里不会只缺 8 次。
-要在浏览器里定这个量，得让处理器把**自己队里的真实剩余**随 ack 一起报回来（`drain{...,queued}`），
-那时控制台那行 `buffered=` 才是"可取深度"而不是"已投递深度"。这一步做不做，取决于下面这个定价：
-
-修好账之后的稳态读数已经说明预算本身是够的（673/681 个 tick 零增量），所以两种改法都在**拿延迟换
-保险**：要么把 `TARGET_FRAMES` 抬到 1536（32ms，盖住这里 p99=25ms 的长尾），要么先在 ack 里加
-`queued` 把真实可取深度测出来、再决定预算怎么摆。清单目标写的是"≤~21ms@1024"，所以本阶段**保留
-1024、把这条如实记成待决**，不偷偷改延迟契约。native 侧不需要纠结：cpal 的拉数线程不会像浏览器主
-线程这样抖（实测 13s `underrun+0`，见 `docs/audio.md`）。
+**定价**：两种改法在延迟上是等价的，都不是白拿 —— 把需求阈值改成按 `queued` 算（处理器可取到
+1024），`buffered` 会跟着抬到 ~1408f；直接把 `TARGET_FRAMES` 抬到 1536 也一样是 32ms。清单目标写的是
+"≤~21ms@1024"，所以本阶段**保留 1024**，把这条记成待决：稳态是干净的（≤20ms 的 tick 零增量），
+残余缺口只发生在 >25ms 的引擎长帧上（这里是 WARP 软件渲染 + 采样器本身在抢主线程），换硬件后应复测。
+native 侧不需要纠结：cpal 的拉数线程不会像浏览器主线程这样抖（实测 13s `underrun+0`，见 `docs/audio.md`）。
 
 ## 挂起与恢复
 
