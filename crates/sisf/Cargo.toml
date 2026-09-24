@@ -50,3 +50,7 @@ path = "../../examples/hello_window.rs"
 [[example]]
 name = "sprite_bench"
 path = "../../examples/sprite_bench.rs"
+
+[[example]]
+name = "windows"
+path = "../../examples/windows.rs"

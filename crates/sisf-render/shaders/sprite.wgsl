@@ -26,6 +26,7 @@ struct VsIn {
     @location(6) rot: f32,
     @location(7) tone: vec4<f32>,
     @location(8) layer: f32,
+    @location(9) mask: f32,
 };
 
 struct FsIn {
@@ -33,6 +34,7 @@ struct FsIn {
     @location(0) uv: vec2<f32>,
     @location(1) color: vec4<f32>,
     @location(2) tone: vec4<f32>,
+    @location(3) mask: f32,
 };
 
 // Rgba/tone 都按 sRGB 数值域书写，而 sRGB 格式的渲染目标要求着色器输出线性值，
@@ -59,13 +61,21 @@ fn vs_main(i: VsIn) -> FsIn {
     o.uv = mix(i.uv0, i.uv1, i.corner);
     o.color = i.color;
     o.tone = i.tone;
+    o.mask = i.mask;
     return o;
 }
 
 @fragment
 fn fs_main(i: FsIn) -> @location(0) vec4<f32> {
     // 纹理按解码时预乘（T4 保证），tint 的 rgb 不带 alpha，故 alpha 单独乘一次。
-    let sampled = textureSample(tex, tex_sampler, i.uv);
+    // mask>0.5：R8Unorm 覆盖率图集（T6 字形）。覆盖率同时当 alpha 和 rgb 的系数——
+    // 输出必须仍是**预乘**的，写成 `vec4(1,1,1,c)` 会让 rgb 与 alpha 脱钩，
+    // 半覆盖的像素按 over 混合后直接饱和成实心方块（golden 里一眼可见）。
+    var sampled = textureSample(tex, tex_sampler, i.uv);
+    if (i.mask > 0.5) {
+        let c = sampled.r;
+        sampled = vec4<f32>(c, c, c, c);
+    }
     let tint = vec3<f32>(s2l(i.color.r), s2l(i.color.g), s2l(i.color.b));
     let alpha = sampled.a * i.color.a;
     var rgb = sampled.rgb * tint * i.color.a;

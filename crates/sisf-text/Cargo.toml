@@ -7,3 +7,12 @@ description = "cosmic-text shaping + 字体字形子图集，输出仍是普通 
 
 [dependencies]
 sisf-render.workspace = true
+wgpu.workspace = true
+cosmic-text.workspace = true
+etagere.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# golden 测试自己写 PNG（不引 `image`，够用即可）；GPU 读回要阻塞等 poll。
+png.workspace = true
+pollster.workspace = true

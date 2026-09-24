@@ -85,15 +85,19 @@ CI 里若没有 GPU 就会拿不到 adapter。跨平台的无窗口冒烟由 `cr
 
 采样点一律取在象限/单元格中心，见下。
 
-## 已知缺陷：图集 `src` 边界的半纹素渗色
+## 已修：图集 `src` 边界的半纹素渗色（T6）
 
-页纹理采样器是 `Linear` + `ClampToEdge`，装箱时子矩形之间没有留 gutter。于是放大绘制某个
+页纹理采样器是 `Linear` + `ClampToEdge`。T5 装箱时子矩形之间没有 gutter，于是放大绘制某个
 `src` 子矩形时，边界最后半个纹素会采到隔壁像素（页上相邻的那张图），基线图里能看到一圈
 1–2px 的色边。影响面：所有"从共享页里取子矩形 + `scale>1`"的绘制。
 
-绕法（当前）：golden 与断言只在格心/象限中心取点。**修法**（后续阶段）：装箱时每单四周留
-1px 复制边（inset gutter），或给 `Bitmap` 一个 `filter: Linear|Nearest` 选项并按需建两个
-sampler。归到 T6（`Bitmap` 渲染目标与子图集一并处理）。
+T6 起装箱四周留 `GUTTER = 1px` 复制边（`AtlasLayout` 的 `upload` 矩形比 `region` 每边宽
+2px，上传时把边缘像素复制出去；贴住页边的两侧省掉，`ClampToEdge` 复制的正好是自己的边缘
+像素）。**基线因此重写**：`cargo xtask golden --bless` 后 `sprite_scene.png` 的格边由
+"248 一类的混合值"变成干净的 255，语义断言一条没改。
+
+`Bitmap` 的 `filter: Linear|Nearest` 双 sampler 仍然没做 —— 像素风要不要最近点采样是 T10
+的事，届时再决定，别提前铺接口。
 
 ## T5 与清单的差
 

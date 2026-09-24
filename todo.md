@@ -100,7 +100,7 @@
    于是放大取子矩形时边界最后半个纹素采到页上相邻图（bless 出的基线图上能看到 1–2px 色边）。
    现在 golden 只在格心/象限中心取点绕开它；**修法是装箱留 1px inset 复制边或按 `Bitmap` 选
    Linear/Nearest sampler**，归 T6（与位图渲染目标、子图集一起做）。任何人加"贴边采样"的
-   断言前都得先看这条。
+   断言前都得先看这条。→ **T6 已按"1px 复制 gutter"修掉**，`sprite_scene.png` 为此重写（见 T6 一节）。
 4. **`Tone::Matrix` 保持"报错"而不是"当无效果"**：后者会让 RGSS 移植层写出的调色代码静默失效、
    排查成本极高。`Multiply/Screen` 同样不预先塞进 `Blend` 枚举 —— 加 pipeline 与删 RGSS 语义
    这个二选一连同 `Matrix` 通路一起在 T12 收口。
@@ -124,13 +124,50 @@
     像素正确；那两端仍只有 `readback.rs` 级别的冒烟覆盖。
 
 ## T6 文本 + Bitmap 渲染目标 + clip stack
-- [ ] `sisf-text/src/lib.rs`：`FontAtlas`（`R8Unorm` 子图集 + `etagere`）+ `layout(text,style)->TextRun`（`cosmic-text 0.19`，shaping/bidi/换行，wasm ✓），字形最终输出为普通 sprite quad、不新增 pipeline。验收：中英混排 + 自动换行；字号 12/16/24 golden。
-- [ ] `FontBundle::from_bytes(&[u8])` 经 VFS 载入 ttf/otf（MV/MZ 自带字体），缺失时回退默认并只 warn 一次。验收：两条路径单测。
-- [ ] `sisf-render/src/bitmap.rs`：`enum BitmapData{ Atlas{page,region}, Rt{texture,view} }` + `BitmapHandle(Arc<Bitmap>)` + `Bitmap::new(w,h)` + `begin_draw/end_draw`（RT 作嵌套 pass 目标）。验收：RT→RT quad 拷贝 golden 正确。
-- [ ] RPG Maker `Bitmap` 风格 API：`blt(src,src_rect,dst_pos,opacity)`、`fill_rect`、`clear_rect`、`draw_text(rect,text,align)`。验收：`examples/windows.rs` 全部用到。
-- [ ] clip stack：`push_clip/pop_clip` → `scissor_rect`，clip 变更即 flush batch。验收：单测断言 flush 次数与栈深。
-- [ ] `examples/windows.rs`：RPG 消息窗（半透明底 + 9 段边框 blt + 裁剪文字 + 头像 blt）。验收：桌面 + wasm 手测。
-- 验收（整段）：文本 golden + 窗体 demo → 提交 `P5 text+bitmap-rt+clip`。
+- [x] `sisf-text/src/lib.rs`：`FontAtlas`（`R8Unorm` 子图集 + `etagere`）+ `layout(text,style)->TextRun`（`cosmic-text 0.19`，shaping/bidi/换行，wasm ✓），字形最终输出为普通 sprite quad、不新增 pipeline。验收：中英混排 + 自动换行；字号 12/16/24 golden。
+- [x] `FontBundle::from_bytes(&[u8])` 经 VFS 载入 ttf/otf（MV/MZ 自带字体），缺失时回退默认并只 warn 一次。验收：两条路径单测。
+- [x] `sisf-render/src/bitmap.rs`：`enum BitmapData{ Atlas{page,region}, Rt{texture,view} }` + `BitmapHandle(Arc<Bitmap>)` + `Bitmap::new(w,h)` + `begin_draw/end_draw`（RT 作嵌套 pass 目标）。验收：RT→RT quad 拷贝 golden 正确。
+- [x] RPG Maker `Bitmap` 风格 API：`blt(src,src_rect,dst_pos,opacity)`、`fill_rect`、`clear_rect`、`draw_text(rect,text,align)`。验收：`examples/windows.rs` 全部用到。
+- [x] clip stack：`push_clip/pop_clip` → `scissor_rect`，clip 变更即 flush batch。验收：单测断言 flush 次数与栈深。
+- [x] `examples/windows.rs`：RPG 消息窗（半透明底 + 9 段边框 blt + 裁剪文字 + 头像 blt）。验收：桌面 + wasm 手测。
+- 验收（整段）：文本 golden + 窗体 demo → 提交 `P5 text+bitmap-rt+clip`。全量落地说明见 `docs/text.md`（三条通路共用一条管线、`sync` 时机、RT 句柄生命周期、clip 断批为何是排序结果、能力矩阵与平台矩阵）。→ `cargo test --workspace --all-features` **124 绿 0 warning**（本阶段新增：`sisf-text` 23 单测 + golden 1 + `sisf-render` clip/会话 16 单测；T5 记的 84 为其基线）+ `cargo xtask golden` 绿（该命令已改为遍历 `GOLDENS` 两条：`sprite_scene` + `text_scene`）+ `cargo xtask check-all` 三端 0 warning + `cargo xtask clippy`（win + wasm，`-D warnings`）+ `cargo xtask fmt --check` 净 + 桌面 `cargo run --release -p sisf --example windows` 截图手测 + wasm 手测（`cargo xtask web windows` → `http://127.0.0.1:8080/?ex=windows&wgl`）。
+
+### T6 期间发现并修正的事实（供后续阶段引用）
+1. **mask 实例的输出必须仍是预乘的**：`sprite.wgsl` 的 mask 分支要写 `vec4(c,c,c,c)`。写成
+   `vec4(1,1,1,c)` 时 rgb 与 alpha 脱钩，半覆盖像素按 over 混合直接饱和成**实心白方块**。基线图上
+   一眼可见，但第一版误判成图集问题，先证明 CPU 影子页正确才定位到着色器 —— 顺序值得抄：
+   覆盖率页正确性可在无 GPU 侧断言（`atlas.rs` 的单测就是这么跑的）。
+2. **覆盖率页不能复用 sprite 那套图集**：页是 `Rgba8UnormSrgb`，塞 alpha 着色器取不到 `.r`，
+   塞 rgb 则 sRGB 解码把 0.5 覆盖弯成 0.216、边缘糊掉。`FontAtlas` 自管 `R8Unorm` 页，
+   epoch 用独立标记位 `MASK_EPOCH = 1<<61`（与 `TARGET_EPOCH`/`LARGE_EPOCH` 各占一位）——
+   否则两条通路会抢同一个 bind group。epoch 的**数值序**（mask < target）就是主帧内的绘制序。
+3. **`Bitmap` 句柄析构 = 页退役**：`Drop` 通知渲染器后，下一次 `apply_atlas` 直接删纹理。因此
+   长存字段必须存 `Bitmap`（RT 与图集子图都是），`Source` 每次现算。第一版把 `new_target` 的返回
+   值掉在构造函数里，运行时 panic `纹理代号 … 尚未注册`。
+4. **`TextEngine::sync` 的时机是硬约束**：必须晚于本帧所有 `draw_*`（否则新字形没建纹理，
+   回退白占位 + 告警）、早于 `end_frame`/`end_draw`（那里按 epoch 取视图建 bind group）。
+   会话中途 `sync` 安全。`examples/windows.rs` 调两次：会话里一次、主帧末尾一次。
+5. **清单里"clip 变更即 flush batch"不需要显式 flush**：clip 代号进 `BatchKey::clip`，断批是
+   排序分组的天然结果；单测断的是"批数随栈深变化"而不是"flush 调用次数"。`NO_CLIP`(0) 恒等于
+   整个目标 ⇒ 主帧与各 RT 会话共用一张 clip 表也不串味。
+6. **自带字体必须显式设默认族**：`FontSystem` 候选表同分时"先注册的赢"，而系统字体几乎总是先
+   注册 —— 不 `set_sans_serif_family` 就压不住它，装了也白装。回退 warn 走进程级去重（同帧构造
+   几十个 `Bitmap` 不该刷屏）。
+7. **wasm 上字体是不可自证的**：fontdb 在 wasm32 扫不到系统字体（`FontSystem` 只有自带字节这条
+   路），而 `eprintln!` 在浏览器里看不见。所以 demo 把"哪一族 / face 数 / 回退成因 / 批数"直接画在
+   屏幕上，手测不靠 devtools。仓库那份 Inter 只有拉丁，中文在 wasm 上无字形（CJK 字体打包不在本阶段）。
+8. **`clear_rect` 与"位图是持久画布"**：wgpu 没有按矩形 clear 纹理，`clear_rect` 是一块 `Blend::Replace`
+   的 quad。会话目标只在**第一次被画之前**清成透明，之后一律 `LoadOp::Load` —— 滚动文字忘记显式
+   `clear_rect` 就糊成一片。
+9. **T5 的半纹素渗色已修，代价是重写基线**：装箱加 1px 复制 gutter 后，`sprite_scene.png` 的格边
+   从 248 一类混合值变成干净的 255；语义断言一条没改，只是原来"绕开边界采样"的注释换成了
+   "边缘同样可断言"。`filter: Linear|Nearest` 的选择权仍留给 T10。
+10. **⚠️ 遗留缺陷：非整数放大倍率下文字发虚**（手测时确认，未在本阶段修）。覆盖率纹素数 ==
+   逻辑像素数（`Metrics::new(style.size, …)` 直接问 swash 要位图，`quad.size` 就用位图尺寸），
+   而 layer 0 的 `Fit` 把 320×240 拉进 800×600 ⇒ 全帧（含字形）被共享的 `Linear` 采样器放大 2.5 倍，
+   16px 的字糊在肉眼层面可辨。修法与"为什么不是换 Nearest"记在 `docs/text.md`「已知缺陷」，
+   **落地在 T8 的「虚拟分辨率映射」那条**（它才拥有 Fit/Fill/IntegerFit 的尺度）。golden 不受影响
+   （离屏 scale 恰为 1）。
 
 ## T7 音频混音器 + OGG/MP3/WAV + MIDI(SF2)
 - [ ] `sisf-audio/src/mixer.rs`（纯 Rust，不碰设备）：`Voice{data,pos,gain,pan,loop_start,loop_end,rate}`、`render(&mut,self,out:&mut [f32])` 交织立体声；通道 `Bgm/Bgs/Me/Se`（Se 多路复用 + voice 上限抢占）、`fade`、`play/stop/pause/resume/suspend`。验收：`render` 确定性单测（四端可跑，无设备）。
@@ -148,7 +185,7 @@
 - [ ] `sisf-app/src/timing.rs`：固定 tick + 累加器（补帧上限 5）+ `draw(alpha)` 插值；`Suspended` 冻结累加器。验收：dt 尖峰与补帧上限单测。
 - [ ] `sisf-sprite/src/task.rs`：`schedule/tick` 任务调度器，承载 `Tween<T>` 关键帧与 MoveRoute。验收：Tween 完成回调按 tick 计数。
 - [ ] `MoveRoute{ nodes:[RouteNode], speed, through }`：`Wait/Turn/Move(dir,n)/MoveTo/Jump/FacingLock`，网格（RPG）与自由（SLG）双模式。验收：逐格移动 + `wait:true` 存活至完成。
-- [ ] 虚拟分辨率映射：`Fit|Fill|IntegerFit` + letterbox，指针/触摸坐标自动映射虚拟空间。验收：整数缩放无半像素抖动、点击命中正确。
+- [ ] 虚拟分辨率映射：`Fit|Fill|IntegerFit` + letterbox，指针/触摸坐标自动映射虚拟空间。验收：整数缩放无半像素抖动、点击命中正确。**接 T6 遗留**：文字覆盖率按逻辑像素光栅、放大倍率非整数时会发虚（`docs/text.md`「已知缺陷」），本条要一并给出光栅超采样档（`raster_scale`）或全分辨率文字层，二选一并写进文档。
 - [ ] `examples/tiled_map.rs`：三层 tilemap（地面/事件/上方，图块 32/48）+ 键盘 4 向行走 + 事件格碰撞。验收：桌面 IntegerFit 544×416 + wasm 手测。
 - 验收（整段）：anim/route/timing 单测 + tiled_map → 提交 `P7 anim+route+tick`。
 
@@ -203,3 +240,5 @@ T2 追加（只加 feature，不加新 crate）：`web-sys` 开 `Element`（复�
 T3 追加（只加 feature，不加新 crate）：`web-sys` 开 `Performance` —— wasm32-unknown-unknown 下 `std::time::Instant::now()` 会 panic（见「T3 期间发现并修正的事实」第 7 条），主循环与 `sprite_bench` 的计时统一走 `platform::now_secs()` = `performance.now()`。`xtask web` 改为接受示例名（`cargo xtask web sprite_bench`），`web/main.js` 按 `?ex=` 动态 import 对应 pkg。
 
 T4 追加（按 DoD-3 登记，均为设计 §依赖清单已验证版本）：`[workspace.dependencies]` 新增 `png 0.18.1`、`jpeg-decoder 0.3.2`、`image-webp 0.2.4`、`gif 0.14.2`、`turbojpeg 1.5.1`（仅非 wasm target 可见，`simd-jpeg` 用）；`web-sys` 追加 `Response` feature（wasm fetch）。crate 间新增 feature 边：`sisf-media/image`（png+jpeg+webp）与 `sisf-media/gif`、`sisf-media/simd-jpeg`（换 turbojpeg）、`sisf-asset/{image,gif,web}`（`web` = wasm fetch provider）、`sisf-render/image`（默认开，图集/上传需要）；门面把 `image` 并入 `native`/`web` 两条主线（图像解码是引擎核心能力）。`xtask web` 构建后把 `crates/sisf-media/tests/fixtures/` 拷进 `web/assets/img/` 供 wasm fetch。图像 fixture（真实 PNG/JPG/WebP/BMP/GIF 小图）入仓在 `crates/sisf-media/tests/fixtures/`。T4 执行时发现：钉版名 `rect-packer` 有误，crates.io 包名是 **`rect_packer`**（下划线），T1 因无人引用未暴露——`[workspace.dependencies]` 已改名。
+
+T6 追加（按 DoD-3 登记）：`[workspace.dependencies]` 新增 `cosmic-text 0.19.0`（T6 清单点名的版本；`etagere 0.3.0` 早在 T1 就钉了，本阶段才第一次被使用）。`crates/sisf-text` 新增依赖边 `wgpu`（自管 `R8Unorm` 覆盖率页，不复用 `sisf-render` 的 sRGB 页）、`thiserror`，dev-dependencies `png` + `pollster`（golden 自己写基线、读回要阻塞 poll）—— 与 `sisf-sprite` 的 golden 依赖面一致，都不进运行时依赖。**没有新增 crate 间 feature 边**：门面本就无条件依赖 `sisf-text`。字体资源：`Inter-Regular.ttf`（SIL OFL 1.1，许可证随文件同目录）入仓两份 —— `crates/sisf-text/tests/fixtures/`（单测 + golden 用，Inter 只有拉丁）与 `web/assets/`（wasm 手测，已追加进 `web/assets/manifest.txt` 供预取）。T6 副作用：图集装箱加 1px 复制 gutter，`crates/sisf-sprite/tests/golden/sprite_scene.png` 基线重写（渗色消失，语义断言未改）；`xtask golden` 从单场景改为遍历 `GOLDENS` 表（`sisf-sprite/golden_sprite` + `sisf-text/golden_text`），任一失败即返回其退出码。

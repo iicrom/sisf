@@ -8,6 +8,8 @@ pub mod atlas;
 #[cfg(feature = "image")]
 pub mod atlas_gpu;
 pub mod batch;
+pub mod bitmap;
+pub mod clip;
 pub mod renderer;
 pub mod ring;
 pub mod vertex;
@@ -17,8 +19,11 @@ pub use atlas::{AtlasLayout, LARGE_EPOCH, LayoutError, LayoutEvent, Region};
 pub use atlas_gpu::{Atlas, AtlasPages, AtlasShared, Bitmap, UploadRing};
 
 pub use batch::{Batch, BatchKey, BatchList, Blend};
+pub use bitmap::{BITMAP_FORMAT, PaintError, Source};
+pub use clip::{ClipStack, NO_CLIP, Scissor, rect_to_pixels};
 pub use renderer::{DrawStats, FrameStatus, Renderer, RendererError, Rgba, WHITE_EPOCH};
 pub use ring::{DEFAULT_QUADS_PER_SLOT, FRAMES_IN_FLIGHT, InstanceRing};
 pub use vertex::{
-    FrameU, Instance, PROJ_STACK_DEPTH, QUAD_INDICES, QUAD_VERTS, mat4_mul, ortho, ortho_viewport,
+    FrameU, Instance, PROJ_STACK_DEPTH, QUAD_INDICES, QUAD_VERTS, mat4_mul, mat4_xform, ortho,
+    ortho_viewport,
 };

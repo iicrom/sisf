@@ -37,8 +37,12 @@ pub struct Instance {
     pub tone: [f32; 4],
     /// viewport 栈索引 0..7。
     pub layer: f32,
+    /// **单通道遮罩标记**（T6 文本）：`>0.5` 表示 `uv0..uv1` 指向的是 `R8Unorm` 覆盖率
+    /// 图集，采样结果取 `.r` 当 alpha、颜色完全来自 `color`。仍走同一条管线，
+    /// 所以"文本是普通 sprite quad"这条约束成立（见 `shaders/sprite.wgsl`）。
+    pub mask: f32,
     /// 补齐到 80B，GPU 侧不读。
-    pub _pad: [f32; 2],
+    pub _pad: f32,
 }
 
 const _: () = assert!(size_of::<Instance>() == 80);
@@ -46,7 +50,7 @@ const _: () = assert!(align_of::<Instance>() == 4);
 
 impl Instance {
     /// 顶点属性描述（顶点缓冲槽 1，`VertexStepMode::Instance`）。
-    pub const ATTRIBUTES: [wgpu::VertexAttribute; 8] = [
+    pub const ATTRIBUTES: [wgpu::VertexAttribute; 9] = [
         wgpu::VertexAttribute {
             format: wgpu::VertexFormat::Float32x2,
             offset: Self::OFF_POS,
@@ -87,6 +91,11 @@ impl Instance {
             offset: Self::OFF_LAYER,
             shader_location: 8,
         },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32,
+            offset: Self::OFF_MASK,
+            shader_location: 9,
+        },
     ];
 
     pub const OFF_POS: u64 = 0;
@@ -97,7 +106,8 @@ impl Instance {
     pub const OFF_ROT: u64 = 48;
     pub const OFF_TONE: u64 = 52;
     pub const OFF_LAYER: u64 = 68;
-    pub const OFF_PAD: u64 = 72;
+    pub const OFF_MASK: u64 = 72;
+    pub const OFF_PAD: u64 = 76;
 
     /// 单实例字节跨度。
     pub const STRIDE: u64 = size_of::<Self>() as u64;
@@ -113,7 +123,8 @@ impl Instance {
             rot: 0.0,
             tone: [0.0; 4],
             layer: f32::from(layer),
-            _pad: [0.0; 2],
+            mask: 0.0,
+            _pad: 0.0,
         }
     }
 }
@@ -208,6 +219,15 @@ pub fn mat4_mul(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
     out
 }
 
+/// 列主序矩阵乘列向量：结果第 `i` 个分量 = `Σ_j m[j][i] * v[j]`。
+pub fn mat4_xform(m: &[[f32; 4]; 4], v: [f32; 4]) -> [f32; 4] {
+    let mut out = [0.0f32; 4];
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = (0..4).map(|j| m[j][i] * v[j]).sum();
+    }
+    out
+}
+
 /// 把 CPU 侧 `[[f32;4];4]`（列主序）矩阵转成 wgpu 可写入的字节。
 pub fn frame_u_bytes(frame: &FrameU) -> &[u8] {
     bytemuck::bytes_of(frame)
@@ -244,6 +264,7 @@ mod tests {
         assert_eq!(offset_of!(Instance, rot) as u64, Instance::OFF_ROT);
         assert_eq!(offset_of!(Instance, tone) as u64, Instance::OFF_TONE);
         assert_eq!(offset_of!(Instance, layer) as u64, Instance::OFF_LAYER);
+        assert_eq!(offset_of!(Instance, mask) as u64, Instance::OFF_MASK);
         assert_eq!(offset_of!(Instance, _pad) as u64, Instance::OFF_PAD);
         // 属性表不得越过最后一个字段。
         for a in Instance::ATTRIBUTES {

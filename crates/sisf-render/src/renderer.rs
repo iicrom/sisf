@@ -1,9 +1,17 @@
-//! 批量 quad 渲染器：目标生命周期（T2 交换链 / T5 离屏）+ 实例管线与批处理（T3）。
+//! 批量 quad 渲染器：目标生命周期（T2 交换链 / T5 离屏）+ 实例管线与批处理（T3）
+//! + clip 栈与位图绘制会话（T6）。
 //!
 //! 帧序：`begin_frame(FrameU, clear)` → `App::draw` 里 `push`/`push_list` 收集实例 →
 //! `end_frame()` 排序分组、写环形缓冲、开**一个** render pass 逐批 draw、提交并呈现。
 //! 之所以 pass 在 `end_frame` 里才开：wgpu 的 `RenderPass` 借用 encoder 与视图，
-//! 跨方法持有会把 `Renderer` 变成自引用结构；T6 的 Bitmap-RT 嵌套 pass 再一并改造。
+//! 跨方法持有会把 `Renderer` 变成自引用结构。
+//!
+//! T6 的两条新通路都**复用同一套管线**，只是换了 pass 的目标与 uniform：
+//! - `push_clip/pop_clip`：裁剪代号进 `BatchKey::clip`，记录时翻译成 `scissor_rect`。
+//!   裁剪一变即断批（合批键里 clip 排在 epoch 之前），所以"改裁剪"与"换纹理"一样自然分批。
+//! - `begin_draw/end_draw`（见 `bitmap` 模块）：把实例画进一张位图渲染目标，pass 目标
+//!   从交换链换成那块纹理，投影换成 `ortho(w,h)`。会话内**按提交顺序**成批
+//!   （`BatchList::build_in_order`），因为 RPG Maker 的绘制指令顺序就是覆盖顺序。
 //!
 //! 目标有两种（`Target`）：窗口交换链，或 `new_offscreen` 建的离屏纹理 +
 //! `readback()`（wgpu 30 无软件光栅，golden 必须走真 adapter，见 `docs/platforms.md`）。
@@ -13,8 +21,10 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::batch::{Batch, BatchKey, BatchList, Blend};
+use crate::bitmap::{Paint, PainterCore};
+use crate::clip::{ClipStack, NO_CLIP, rect_to_pixels};
 use crate::ring::{DEFAULT_QUADS_PER_SLOT, FRAMES_IN_FLIGHT, InstanceRing};
-use crate::vertex::{FrameU, Instance};
+use crate::vertex::{FrameU, Instance, PROJ_STACK_DEPTH, ortho};
 use crate::vertex::{QUAD_INDICES, create_quad_buffers, frame_u_bytes};
 
 const SPRITE_SHADER: &str = include_str!("../shaders/sprite.wgsl");
@@ -35,7 +45,7 @@ fn srgb_to_linear(c: f32) -> f32 {
 
 /// `Rgba` 是 sRGB 数值域，而 `wgpu::Color` 按线性空间解释（sRGB 格式纹理由硬件再编码回 sRGB），
 /// 所以清屏前必须转线性——否则颜色会偏亮（实测 0.35 → 160/255 而非 89/255）。
-fn to_color(c: Rgba) -> wgpu::Color {
+pub(crate) fn to_color(c: Rgba) -> wgpu::Color {
     wgpu::Color {
         r: srgb_to_linear(c[0]) as f64,
         g: srgb_to_linear(c[1]) as f64,
@@ -90,7 +100,7 @@ enum Target {
 }
 
 /// 离屏目标的纹理格式：与最常见的 surface 格式一致，golden 才证明的是同一条管线。
-const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+pub(crate) const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 fn make_offscreen_texture(
     device: &wgpu::Device,
@@ -121,23 +131,38 @@ pub struct Renderer {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     target: Target,
-    quad: Option<Quad>,
+    // 以下字段对 `bitmap`（绘制会话）开放：会话与主帧共用同一套管线资源，
+    // 拆成公开 API 反而会把内部结构体（`Quad`/`Paint`）漏进门面。
+    pub(crate) quad: Option<Quad>,
     ring: InstanceRing,
-    frame: Option<PendingFrame>,
+    pub(crate) frame: Option<PendingFrame>,
     pending: BatchList<Instance>,
     /// 实例落位用的复用暂存（排序后摊平成连续字节，一次 `write_buffer` 一片）。
-    scratch: Vec<Instance>,
+    pub(crate) scratch: Vec<Instance>,
     stats: Option<DrawStats>,
-    /// `epoch → 纹理视图`，T4 的图集页/RT 注册进来。
-    epoch_views: HashMap<u64, wgpu::TextureView>,
-    warned_epochs: Vec<u64>,
+    /// `epoch → 纹理视图`，T4 起图集页/RT 注册进来。
+    pub(crate) epoch_views: HashMap<u64, wgpu::TextureView>,
+    pub(crate) warned_epochs: Vec<u64>,
     /// adapter 实际允许建线框管线（`debug_lines` 且 `POLYGON_MODE_LINE`）。
     allow_lines: bool,
+    /// 主帧的裁剪栈（`begin_frame` 时按目标尺寸重置）。
+    clips: ClipStack,
+    /// 活动中的位图绘制会话（`begin_draw` 到 `end_draw` 之间是 `Some`）。
+    pub(crate) paint: Option<Paint>,
+    /// `RT epoch → 该目标的绘制内核`（uniform + 环形实例片）。跨帧复用，
+    /// 因为同一张位图通常每帧都画。
+    pub(crate) painters: HashMap<u64, PainterCore>,
+    /// 绘制会话专用的管线集（目标恒为 `BITMAP_FORMAT`）。
+    ///
+    /// 不能直接用主帧那份：交换链格式在 Windows 上常是 `Bgra8UnormSrgb`，而位图页是
+    /// `Rgba8UnormSrgb`，同一条管线写不了两种格式的目标。这份 Quad 只建一次、永不重建
+    /// （格式固定），所以 `PainterCore` 的 group0 bind group 与它天然一致。
+    pub(crate) paint_quad: Option<Quad>,
 }
 
 /// 帧间收集的实例与本次的 uniform/清屏色。
-struct PendingFrame {
-    frame_u: FrameU,
+pub(crate) struct PendingFrame {
+    pub(crate) frame_u: FrameU,
     clear: Rgba,
 }
 
@@ -152,8 +177,10 @@ pub struct DrawStats {
 }
 
 /// 与 surface 格式绑定的 GPU 资源：管线、quad 缓冲、环形实例槽。
-struct Quad {
+pub(crate) struct Quad {
     format: wgpu::TextureFormat,
+    /// group0 布局：位图绘制会话的 `PainterCore` 要按它建自己的 uniform 组。
+    pub(crate) frame_layout: wgpu::BindGroupLayout,
     /// group1 布局，`epoch → bind group` 惰性创建时用。
     batch_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -171,16 +198,20 @@ struct Quad {
     slot_capacity: u32,
     normal: wgpu::RenderPipeline,
     add: wgpu::RenderPipeline,
+    /// 直接替换目标（`Blend::Replace`）：`clear_rect` 用它在裁剪下写出真透明。
+    replace: wgpu::RenderPipeline,
     /// `debug_lines` feature 下的线框克隆（需 `POLYGON_MODE_LINE`）。
     lines: Option<wgpu::RenderPipeline>,
 }
 
 impl Quad {
-    fn new(
+    /// `ring` 为 `None` 时不建实例槽：绘制会话用的那份自带 `PainterCore::slots`，
+    /// 这里只需要管线与 group0/group1 的资源。
+    pub(crate) fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
-        ring: &InstanceRing,
+        ring: Option<&InstanceRing>,
         allow_lines: bool,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -267,17 +298,10 @@ impl Quad {
         });
         let default_group = batch_bind_group(device, &g1, &white_view, &sampler);
         let (quad_vb, index) = create_quad_buffers(device);
-        let slot_capacity = ring.capacity().max(1);
-        let slots = (0..ring.buffers())
-            .map(|i| {
-                device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some(&format!("sisf-instances-{i}")),
-                    size: slot_capacity as u64 * Instance::STRIDE,
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                })
-            })
-            .collect();
+        let slot_capacity = ring.map_or(0, |r| r.capacity().max(1));
+        let slots = ring.map_or_else(Vec::new, |r| {
+            make_instance_buffers(device, r.buffers(), slot_capacity)
+        });
         let buffers = [
             Some(wgpu::VertexBufferLayout {
                 array_stride: size_of::<[f32; 2]>() as u64,
@@ -306,6 +330,15 @@ impl Quad {
                 None,
             ),
             add: pipeline(device, &shader, &layout, format, Blend::Add, &buffers, None),
+            replace: pipeline(
+                device,
+                &shader,
+                &layout,
+                format,
+                Blend::Replace,
+                &buffers,
+                None,
+            ),
             lines: allow_lines.then(|| {
                 pipeline(
                     device,
@@ -318,6 +351,7 @@ impl Quad {
                 )
             }),
             // pipeline layout 由三条管线各自持有；g1 留给 bind group 惰性创建。
+            frame_layout: g0,
             batch_layout: g1,
             sampler,
             frame_group,
@@ -334,14 +368,18 @@ impl Quad {
     }
 
     fn pipeline(&self, blend: Blend) -> &wgpu::RenderPipeline {
-        // `debug_lines` 构建（且 adapter 支持）下所有批次都走线框管线；
+        // `debug_lines` 构建（且 adapter 支持）下**混合语义的**批次都走线框管线；
         // 其余构建里该臂被 cfg 掉，`lines` 恒为 None。
-        match self.lines.as_ref() {
-            #[cfg(feature = "debug_lines")]
-            Some(lines) => lines,
-            _ => match blend {
-                Blend::Normal => &self.normal,
-                Blend::Add => &self.add,
+        // `Replace` 例外：它是 `clear_rect` 的语义本体（写透明），线框会画错。
+        match blend {
+            Blend::Replace => &self.replace,
+            _ => match self.lines.as_ref() {
+                #[cfg(feature = "debug_lines")]
+                Some(lines) => lines,
+                _ => match blend {
+                    Blend::Add => &self.add,
+                    _ => &self.normal,
+                },
             },
         }
     }
@@ -373,80 +411,114 @@ impl Quad {
         self.groups.get(&epoch).unwrap_or(&self.default_group)
     }
 
-    /// 把排序后的实例按逻辑槽写进环形缓冲：每片一次 `write_buffer`。
-    ///
-    /// `items` 必须是 `BatchList::build` 之后的 `sorted_items()`——同槽实例在内存里连续，
-    /// 才能整段上传。`scratch` 只是把 `(BatchKey, Instance)` 对摊平成 `Instance` 序列。
-    fn upload_slots(
-        &self,
-        queue: &wgpu::Queue,
-        ring: &InstanceRing,
-        items: &[(BatchKey, Instance)],
-        scratch: &mut Vec<Instance>,
-    ) {
-        let capacity = ring.capacity();
-        debug_assert_eq!(self.slot_capacity, capacity, "实例槽容量与环形计划不一致");
-        for logical in 0..ring.slots_used() {
-            let from = (logical * capacity) as usize;
-            let to = items.len().min(from + capacity as usize);
-            scratch.clear();
-            scratch.extend(items[from..to].iter().map(|(_, i)| *i));
-            let buffer = &self.slots[ring.buffer_for(logical)];
-            queue.write_buffer(buffer, 0, bytemuck::cast_slice(&*scratch));
-        }
-    }
-
-    /// 在**同一个** render pass 内逐批记录绘制：按批切管线、bind group 与实例缓冲。
-    ///
-    /// 状态变更刻意做了去重：管线只在 blend 变化时重设、顶点缓冲只在跨物理槽时重设，
-    /// 这正是"相邻同键合并成一次 draw"的意义所在。
-    fn record(
-        &mut self,
-        pass: &mut wgpu::RenderPass,
-        device: &wgpu::Device,
-        batches: &[Batch],
-        ring: &InstanceRing,
-        views: &HashMap<u64, wgpu::TextureView>,
-        warned: &mut Vec<u64>,
-    ) {
-        pass.set_bind_group(0, &self.frame_group, &[]);
-        pass.set_vertex_buffer(0, self.quad_vb.slice(..));
-        pass.set_index_buffer(self.index.slice(..), wgpu::IndexFormat::Uint16);
-        let indices = 0..QUAD_INDICES.len() as u32;
-        let mut bound_blend = None;
-        // 批里的实例下标是**槽内**下标，所以只有换物理片才需要重绑顶点缓冲。
-        let mut bound_buffer = usize::MAX;
-        for b in batches {
-            if bound_blend != Some(b.blend) {
-                bound_blend = Some(b.blend);
-                let pipeline = self.pipeline(b.blend).clone();
-                pass.set_pipeline(&pipeline);
-            }
-            let slot_buffer = ring.buffer_for(b.slot);
-            if bound_buffer != slot_buffer {
-                bound_buffer = slot_buffer;
-                let buffer = &self.slots[slot_buffer];
-                pass.set_vertex_buffer(1, buffer.slice(..));
-            }
-            let group = self.bind_group(device, b.epoch, views, warned);
-            pass.set_bind_group(1, group, &[]);
-            pass.draw_indexed(indices.clone(), 0, b.start..b.start + b.len);
-        }
-    }
-
     /// 容量增长后重建实例槽（旧内容由 GPU 读完，直接换新片）。
     fn resize_slots(&mut self, device: &wgpu::Device, capacity: u32) {
         self.slot_capacity = capacity.max(1);
-        self.slots = (0..self.slots.len())
-            .map(|i| {
-                device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some(&format!("sisf-instances-{i}")),
-                    size: self.slot_capacity as u64 * Instance::STRIDE,
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                })
+        self.slots = make_instance_buffers(device, self.slots.len(), self.slot_capacity);
+    }
+}
+
+/// 建 `n` 片可容纳 `capacity` 个实例的顶点缓冲（主帧与各位图会话同一种布局）。
+pub(crate) fn make_instance_buffers(
+    device: &wgpu::Device,
+    n: usize,
+    capacity: u32,
+) -> Vec<wgpu::Buffer> {
+    (0..n)
+        .map(|i| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("sisf-instances-{i}")),
+                size: capacity.max(1) as u64 * Instance::STRIDE,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
             })
-            .collect();
+        })
+        .collect()
+}
+
+/// 把排序后的实例按逻辑槽写进环形缓冲：每片一次 `write_buffer`。
+///
+/// `items` 必须是 `BatchList::build*` 之后的 `sorted_items()`——同槽实例在内存里连续，
+/// 才能整段上传。`scratch` 只是把 `(BatchKey, Instance)` 对摊平成 `Instance` 序列。
+/// `slots` 是这片环形计划的物理缓冲：主帧给 `Quad::slots`，绘制会话给
+/// `PainterCore::slots`（各自轮换，互不覆盖）。
+pub(crate) fn upload_slots(
+    ring: &InstanceRing,
+    slots: &[wgpu::Buffer],
+    queue: &wgpu::Queue,
+    items: &[(BatchKey, Instance)],
+    scratch: &mut Vec<Instance>,
+) {
+    let capacity = ring.capacity();
+    debug_assert!(
+        slots.len() >= ring.buffers(),
+        "环形计划要 {} 片缓冲，实际只有 {}",
+        ring.buffers(),
+        slots.len()
+    );
+    for logical in 0..ring.slots_used() {
+        let from = (logical * capacity) as usize;
+        let to = items.len().min(from + capacity as usize);
+        scratch.clear();
+        scratch.extend(items[from..to].iter().map(|(_, i)| *i));
+        let buffer = &slots[ring.buffer_for(logical)];
+        queue.write_buffer(buffer, 0, bytemuck::cast_slice(&*scratch));
+    }
+}
+
+/// 在**一个** render pass 内逐批记录绘制：按批切管线、bind group、实例缓冲与裁剪。
+///
+/// 状态变更刻意做了去重：管线只在 blend 变化时重设、顶点缓冲只在跨物理片时重设、
+/// scissor 只在裁剪代号变化时重设——这正是"相邻同键合并成一次 draw"的意义所在。
+/// 主帧与位图绘制会话共用这一条：差别只在 `frame_group`（投影）、`slots`（环形片）
+/// 与 `clips`（哪张裁剪表）。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record(
+    quad: &mut Quad,
+    pass: &mut wgpu::RenderPass,
+    device: &wgpu::Device,
+    batches: &[Batch],
+    ring: &InstanceRing,
+    slots: &[wgpu::Buffer],
+    frame_group: &wgpu::BindGroup,
+    clips: &ClipStack,
+    views: &HashMap<u64, wgpu::TextureView>,
+    warned: &mut Vec<u64>,
+) {
+    pass.set_bind_group(0, frame_group, &[]);
+    pass.set_vertex_buffer(0, quad.quad_vb.slice(..));
+    pass.set_index_buffer(quad.index.slice(..), wgpu::IndexFormat::Uint16);
+    let indices = 0..QUAD_INDICES.len() as u32;
+    let mut bound_blend = None;
+    // 批里的实例下标是**槽内**下标，所以只有换物理片才需要重绑顶点缓冲。
+    let mut bound_buffer = usize::MAX;
+    let mut bound_clip = u32::MAX;
+    for b in batches {
+        if b.clip != bound_clip {
+            let Some(r) = clips.rect_of(b.clip) else {
+                continue;
+            };
+            if r.is_empty() {
+                // 裁到什么都不剩：跳过 draw（wgpu 的 scissor 不接受 0 宽高）。
+                bound_clip = b.clip;
+                continue;
+            }
+            bound_clip = b.clip;
+            pass.set_scissor_rect(r.x, r.y, r.w, r.h);
+        }
+        if bound_blend != Some(b.blend) {
+            bound_blend = Some(b.blend);
+            let pipeline = quad.pipeline(b.blend).clone();
+            pass.set_pipeline(&pipeline);
+        }
+        let slot_buffer = ring.buffer_for(b.slot);
+        if bound_buffer != slot_buffer {
+            bound_buffer = slot_buffer;
+            pass.set_vertex_buffer(1, slots[slot_buffer].slice(..));
+        }
+        let group = quad.bind_group(device, b.epoch, views, warned);
+        pass.set_bind_group(1, group, &[]);
+        pass.draw_indexed(indices.clone(), 0, b.start..b.start + b.len);
     }
 }
 
@@ -488,11 +560,18 @@ fn pipeline(
             dst_factor: wgpu::BlendFactor::One,
             ..wgpu::BlendComponent::OVER
         },
+        // 不做混合：片元输出直接成为目标像素，`clear_rect` 因此能写回"真透明"。
+        Blend::Replace => wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::Zero,
+            operation: wgpu::BlendOperation::Add,
+        },
     };
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(match blend {
             Blend::Normal => "sisf-sprite-normal",
             Blend::Add => "sisf-sprite-add",
+            Blend::Replace => "sisf-sprite-replace",
         }),
         layout: Some(layout),
         vertex: wgpu::VertexState {
@@ -516,11 +595,19 @@ fn pipeline(
                 format,
                 blend: Some(wgpu::BlendState {
                     color: component,
-                    alpha: wgpu::BlendComponent {
+                    alpha: match blend {
                         // alpha 通道按 1-srcA 走，additive 也不例外（否则透明区会被写脏）。
-                        src_factor: wgpu::BlendFactor::One,
-                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                        operation: wgpu::BlendOperation::Add,
+                        Blend::Normal | Blend::Add => wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        // 替换：clear_rect 要把 alpha 一起写成 0，混一下就不透明了。
+                        Blend::Replace => wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::Zero,
+                            operation: wgpu::BlendOperation::Add,
+                        },
                     },
                 }),
                 write_mask: wgpu::ColorWrites::ALL,
@@ -609,6 +696,10 @@ impl Renderer {
             epoch_views: HashMap::new(),
             warned_epochs: Vec::new(),
             allow_lines,
+            clips: ClipStack::default(),
+            paint: None,
+            painters: HashMap::new(),
+            paint_quad: None,
         })
     }
 
@@ -652,6 +743,10 @@ impl Renderer {
             warned_epochs: Vec::new(),
             // 线框只用于窗口调试，离屏通路永远实心。
             allow_lines: false,
+            clips: ClipStack::default(),
+            paint: None,
+            painters: HashMap::new(),
+            paint_quad: None,
         };
         me.ensure_quad(OFFSCREEN_FORMAT);
         Ok(me)
@@ -773,16 +868,79 @@ impl Renderer {
         if stale {
             self.quad = None;
             // 旧 bind group 随 Quad 一起释放，epoch 视图本身保留在 epoch_views。
+            // 绘制会话的 uniform/bind group 是按旧 layout 建的，必须一起丢。
+            self.painters.clear();
+            self.paint = None;
         }
         if self.quad.is_none() {
             let quad = Quad::new(
                 &self.device,
                 &self.queue,
                 format,
-                &self.ring,
+                Some(&self.ring),
                 self.allow_lines,
             );
             self.quad = Some(quad);
+        }
+    }
+
+    /// 当前落位目标的像素尺寸；未配置返回 `(0,0)`（裁剪因此恒为空）。
+    pub(crate) fn target_size(&self) -> (u32, u32) {
+        match &self.target {
+            Target::Surface { config, .. } => {
+                config.as_ref().map_or((0, 0), |c| (c.width, c.height))
+            }
+            Target::Offscreen { size, .. } => *size,
+        }
+    }
+
+    /// 当前目标裁剪栈的栈深（0 = 未裁剪；`push_clip`/`pop_clip` 的镜像计数）。
+    ///
+    /// 绘制会话里报的是**那张位图**的栈深——`push_clip` 作用的正是它，两者必须一致。
+    pub fn clip_depth(&self) -> usize {
+        match &self.paint {
+            Some(p) => p.clips.depth(),
+            None => self.clips.depth(),
+        }
+    }
+
+    /// 当前目标分配过多少个裁剪代号（= 至少会出现多少次断批）。
+    pub fn clip_ids_used(&self) -> u32 {
+        match &self.paint {
+            Some(p) => p.clips.pushed(),
+            None => self.clips.pushed(),
+        }
+    }
+
+    /// 按下一层裁剪，作用在**当前正在画的目标**上：主帧是窗口/离屏，绘制会话内是那张位图。
+    ///
+    /// `rect` 是第 `layer` 层投影下的内容坐标 `[x, y, w, h]`（会话内投影恒为
+    /// `ortho(w,h)`，`layer` 被忽略、`rect` 即位图像素）。返回裁剪代号，
+    /// 它进 `BatchKey::clip`；嵌套自动求交，交空即"这一层什么都不画"。
+    pub fn push_clip(&mut self, layer: u32, rect: [f32; 4]) -> u32 {
+        let (proj, target) = match self.paint.as_ref() {
+            Some(p) => (p.proj(), p.size),
+            None => {
+                let proj = self
+                    .frame
+                    .as_ref()
+                    .map(|f| f.frame_u.proj[layer as usize % PROJ_STACK_DEPTH])
+                    .unwrap_or_else(|| ortho(0.0, 0.0));
+                (proj, self.clips.target())
+            }
+        };
+        let scissor = rect_to_pixels(&proj, rect, target);
+        match self.paint.as_mut() {
+            Some(p) => p.clips.push(scissor),
+            None => self.clips.push(scissor),
+        }
+    }
+
+    /// 弹出一层裁剪（栈空时 no-op，回到"不裁剪"）。
+    pub fn pop_clip(&mut self) {
+        match self.paint.as_mut() {
+            Some(p) => p.clips.pop(),
+            None => self.clips.pop(),
         }
     }
 
@@ -802,19 +960,33 @@ impl Renderer {
         Ok(out)
     }
 
+    /// 渲染器持有的 device/queue。外部资源（T6 的字形覆盖率页）必须用**同一套**，
+    /// 否则建出来的纹理进不了这个设备的 bind group。
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
     /// 登记一个纹理代号（图集页/Bitmap-RT）供批次取用。T4 的图集走这里。
     /// 重复登记同一代号会换图并丢弃缓存的 bind group（epoch 语义 = 内容不可变）。
     pub fn register_epoch(&mut self, epoch: u64, view: wgpu::TextureView) {
         self.epoch_views.insert(epoch, view);
-        if let Some(quad) = self.quad.as_mut() {
-            quad.groups.remove(&epoch);
+        for quad in [&mut self.quad, &mut self.paint_quad] {
+            if let Some(quad) = quad.as_mut() {
+                quad.groups.remove(&epoch);
+            }
         }
     }
 
     pub fn unregister_epoch(&mut self, epoch: u64) {
         self.epoch_views.remove(&epoch);
-        if let Some(quad) = self.quad.as_mut() {
-            quad.groups.remove(&epoch);
+        for quad in [&mut self.quad, &mut self.paint_quad] {
+            if let Some(quad) = quad.as_mut() {
+                quad.groups.remove(&epoch);
+            }
         }
     }
 
@@ -836,26 +1008,53 @@ impl Renderer {
         self.stats
     }
 
-    /// 帧首：记下本帧 uniform 与清屏色，并清空上一帧实例。必须在 `App::draw` 前调用。
+    /// 帧首：记下本帧 uniform 与清屏色，并清空上一帧实例与裁剪栈。必须在 `App::draw` 前调用。
     pub fn begin_frame(&mut self, frame: &FrameU, clear: Rgba) {
         self.pending.reset();
+        self.clips.begin(self.target_size());
         self.frame = Some(PendingFrame {
             frame_u: *frame,
             clear,
         });
     }
 
-    /// 收集一个实例（真正落位与分组发生在 `end_frame`）。
+    /// 收集一个实例（真正落位与分组发生在 `end_frame`/`end_draw`）。
+    ///
+    /// `key.clip` 由这里按当前裁剪栈**覆写**：调用方填什么都不作数，因为只有渲染器
+    /// 知道此刻正在往哪个目标画、裁剪栈顶是谁。绘制会话内的实例直接进会话列表。
     pub fn push(&mut self, key: BatchKey, instance: Instance) {
-        self.pending.push(key, instance);
+        match self.paint.as_mut() {
+            Some(p) => {
+                let clip = p.clips.top();
+                p.list.push(BatchKey { clip, ..key }, instance);
+            }
+            None => {
+                let clip = self.clips.top();
+                self.pending.push(BatchKey { clip, ..key }, instance);
+            }
+        }
     }
 
-    /// 并入一个子列表（位图 pass / 子层渲染器产出）。
+    /// 并入一个子列表（精灵采集 / 文本 / 子层渲染器产出）。
+    ///
+    /// 与 `push` 同一条规则：列表里携带的 `clip` 一律按当前栈顶重填，所以
+    /// "采集时不知道自己会被画进哪个裁剪区"的列表可以直接复用。
     pub fn append_list(&mut self, list: BatchList<Instance>) {
-        self.pending.append(list);
+        let clip = match self.paint.as_ref() {
+            Some(p) => p.clips.top(),
+            None => self.clips.top(),
+        };
+        let mut list = list;
+        if clip != NO_CLIP {
+            list.set_clip(clip);
+        }
+        match self.paint.as_mut() {
+            Some(p) => p.list.append(list),
+            None => self.pending.append(list),
+        }
     }
 
-    /// 本帧已收集的实例数。
+    /// 本帧已收集的实例数（绘制会话内的实例不算，它们在自己的列表里）。
     pub fn instance_count(&self) -> usize {
         self.pending.len()
     }
@@ -865,6 +1064,12 @@ impl Renderer {
     /// 空实例集合也走完整流程，等价于一次清屏（T2 的行为）。离屏目标返回
     /// `Rendered`，随后用 `readback` 取像素。
     pub fn end_frame(&mut self) -> FrameStatus {
+        // 忘了 end_draw 也不能丢内容：先把它当本帧最后一次会话补完。
+        if self.paint.is_some()
+            && let Err(e) = self.end_draw()
+        {
+            eprintln!("sisf-render: end_frame 补收尾绘制会话失败: {e}");
+        }
         let Some(PendingFrame { frame_u, clear }) = self.frame.take() else {
             self.pending.reset();
             return FrameStatus::Skipped("缺少 begin_frame");
@@ -883,13 +1088,18 @@ impl Renderer {
         let batches = self.pending.build(self.ring.capacity());
         queue.write_buffer(&quad.frame_uniform, 0, frame_u_bytes(&frame_u));
 
-        // 按槽落位 + 逐批记录，都走 Quad（无 surface 的单测复用同一条路径）。
-        quad.upload_slots(
-            &queue,
+        // 按槽落位 + 逐批记录，都走同一个 `record`（无 surface 的单测复用这条路径）。
+        upload_slots(
             &self.ring,
+            &quad.slots,
+            &queue,
             self.pending.sorted_items(),
             &mut self.scratch,
         );
+        // `wgpu::Buffer` 是 `Arc` 句柄，克隆一份列表 = 三个引用计数，
+        // 但足以把 `quad` 的可变借用与 `slots` 的不可变借用分开。
+        let frame_group = quad.frame_group.clone();
+        let slots = quad.slots.clone();
 
         // 目标视图：交换链每帧现取（`SurfaceTexture` 必须活到 submit 之后），
         // 离屏则借现有视图（clone 一下即可解开对 `self.target` 的借用）。
@@ -922,11 +1132,15 @@ impl Renderer {
                 })],
                 ..Default::default()
             });
-            quad.record(
+            record(
+                &mut quad,
                 &mut pass,
                 &device,
                 &batches,
                 &self.ring,
+                &slots,
+                &frame_group,
+                &self.clips,
                 &self.epoch_views,
                 &mut self.warned_epochs,
             );
@@ -976,6 +1190,7 @@ fn acquire(
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod gpu_tests {
     use super::*;
+    use crate::clip::NO_CLIP;
     use crate::vertex::{PROJ_STACK_DEPTH, ortho};
 
     const TARGET: u32 = 64;
@@ -1035,7 +1250,8 @@ mod gpu_tests {
             rot: 0.0,
             tone: [0.0; 4],
             layer: 0.0,
-            _pad: [0.0; 2],
+            mask: 0.0,
+            _pad: 0.0,
         }
     }
 
@@ -1048,7 +1264,7 @@ mod gpu_tests {
             &device,
             &queue,
             wgpu::TextureFormat::Rgba8UnormSrgb,
-            &ring,
+            Some(&ring),
             false,
         );
 
@@ -1059,6 +1275,7 @@ mod gpu_tests {
 
         let key = |epoch: u64, blend: Blend, z: i32| BatchKey {
             layer: 0,
+            clip: NO_CLIP,
             epoch,
             blend,
             z,
@@ -1111,7 +1328,13 @@ mod gpu_tests {
         assert_eq!(ring.slots_used(), 2);
 
         let mut scratch = Vec::new();
-        quad.upload_slots(&queue, &ring, list.sorted_items(), &mut scratch);
+        upload_slots(
+            &ring,
+            &quad.slots,
+            &queue,
+            list.sorted_items(),
+            &mut scratch,
+        );
         let stack = [ortho(TARGET as f32, TARGET as f32); PROJ_STACK_DEPTH];
         queue.write_buffer(
             &quad.frame_uniform,
@@ -1149,7 +1372,22 @@ mod gpu_tests {
                 })],
                 ..Default::default()
             });
-            quad.record(&mut pass, &device, &batches, &ring, &views, &mut warned);
+            let frame_group = quad.frame_group.clone();
+            let slots = quad.slots.clone();
+            let mut clips = ClipStack::default();
+            clips.begin((TARGET, TARGET));
+            record(
+                &mut quad,
+                &mut pass,
+                &device,
+                &batches,
+                &ring,
+                &slots,
+                &frame_group,
+                &clips,
+                &views,
+                &mut warned,
+            );
         }
         let pitch = TARGET * 4;
         let readback = device.create_buffer(&wgpu::BufferDescriptor {

@@ -86,6 +86,9 @@ impl SpriteArena {
             };
             buf.push((
                 BatchKey {
+                    // 采集端不知道会被画进哪个裁剪区，填 0 即可：`Renderer::push`
+                    // 会按当前栈顶覆写它。
+                    clip: 0,
                     layer: view.layer.0,
                     epoch: s.epoch(),
                     blend: s.blend,

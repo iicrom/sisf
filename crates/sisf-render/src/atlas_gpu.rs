@@ -6,12 +6,18 @@
 //!   对齐的 `bytes_per_row` 摆进去，一次 `write_buffer` + 每张位图一次
 //!   `copy_buffer_to_texture`，最后**一次** submit。容量几何增长后跨帧保留。
 //!   刻意不走 `map_async`：wasm 下没法阻塞等映射完成。
+//! - **上传的是带 1px gutter 的矩形**（`atlas::GUTTER`，T5 渗色缺陷的修法）：
+//!   CPU 像素按"边缘复制"扩一圈再落页，所以采样时线性过滤永远采到自己的边缘色。
 //! - `Bitmap` 是 `Arc` 句柄，Clone 共享、最后一个 Drop 时向图集投递释放（页上
 //!   最后一张图走 → 整页退役 → `Renderer::unregister_epoch`）。
 //! - **布局与 GPU 资源分开**：`Atlas`（纯装箱，`Send`，解码线程也能碰）与
 //!   `AtlasPages`（页纹理，只能在主线程/持有 device 的一侧）。wasm 后端的
 //!   `wgpu::Texture` 不是 `Send`，混在一起会让 `AssetStore<Bitmap>` 的 `Send` 约束
 //!   在 wasm 上直接失败。
+//! - **渲染目标**（`Atlas::new_target`，T6）是同一条通路的第三种页：整页独占、无 CPU
+//!   像素、纹理多一个 `RENDER_ATTACHMENT`。它的 GPU 视图仍只存在于
+//!   `Renderer::epoch_views`，所以 `Bitmap` 在 wasm 上照样 `Send`（见 todo.md：这是与
+//!   设计稿 `BitmapData::Rt{texture,view}` 的有意差异）。
 //! - 与渲染器的同步点是应用侧每帧一次
 //!   `renderer.apply_atlas(&atlas, &mut pages, &mut uploads)`（应用布局事件 + 上传），
 //!   在 `App::draw` 里收集实例之前调用，引擎门面里再包装。
@@ -19,16 +25,26 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 
-use crate::atlas::{AtlasLayout, LARGE_EPOCH, LayoutError, LayoutEvent, Region};
+use crate::atlas::{Allocation, AtlasLayout, LayoutError, LayoutEvent, PageKind, Region};
 use crate::renderer::Renderer;
 
 /// 一页 = 一张 `Rgba8UnormSrgb` 纹理 + 它的默认 view。
+///
+/// RT 页额外要 `RENDER_ATTACHMENT`；格式三端统一，所以"画进位图"与"画进窗口"
+/// 走的是同一条色彩通路（sRGB 编码由硬件负责）。
 fn make_page(
     device: &wgpu::Device,
     label: String,
     width: u32,
     height: u32,
+    kind: PageKind,
 ) -> (wgpu::Texture, wgpu::TextureView) {
+    let mut usage = wgpu::TextureUsages::TEXTURE_BINDING
+        | wgpu::TextureUsages::COPY_DST
+        | wgpu::TextureUsages::COPY_SRC;
+    if kind == PageKind::Target {
+        usage |= wgpu::TextureUsages::RENDER_ATTACHMENT;
+    }
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(&label),
         size: wgpu::Extent3d {
@@ -40,9 +56,7 @@ fn make_page(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_DST
-            | wgpu::TextureUsages::COPY_SRC,
+        usage,
         view_formats: &[],
     });
     let view = texture.create_view(&Default::default());
@@ -119,9 +133,10 @@ impl AtlasPages {
                     epoch,
                     width,
                     height,
+                    kind,
                 } => {
                     let (texture, view) =
-                        make_page(device, format!("sisf-atlas-{epoch}"), width, height);
+                        make_page(device, format!("sisf-atlas-{epoch}"), width, height, kind);
                     self.by_epoch.insert(epoch, texture);
                     created.push((epoch, view));
                 }
@@ -156,7 +171,7 @@ impl Atlas {
         }
     }
 
-    /// 普通位图：装箱进分桶页。`pixels` 必须是 premultiplied RGBA8。
+    /// 普通位图：装箱进分桶页（四周自动补 1px gutter）。`pixels` 必须是 premultiplied RGBA8。
     pub fn new_bitmap(
         &self,
         width: u32,
@@ -164,13 +179,13 @@ impl Atlas {
         pixels: Vec<u8>,
         now_frame: u64,
     ) -> Result<Bitmap, LayoutError> {
-        let (epoch, region) = self
+        let (epoch, alloc) = self
             .shared
             .layout
             .lock()
             .unwrap()
             .allocate(width, height, now_frame)?;
-        Ok(self.finish_bitmap(epoch, width, height, pixels, region))
+        Ok(self.finish_bitmap(epoch, width, height, pixels, alloc))
     }
 
     /// 大图旁路：超过桶的位图独占一页。
@@ -181,13 +196,47 @@ impl Atlas {
         pixels: Vec<u8>,
         now_frame: u64,
     ) -> Result<Bitmap, LayoutError> {
-        let (epoch, region) = self
+        let (epoch, alloc) = self
             .shared
             .layout
             .lock()
             .unwrap()
             .allocate_large(width, height, now_frame)?;
-        Ok(self.finish_bitmap(epoch, width, height, pixels, region))
+        Ok(self.finish_bitmap(epoch, width, height, pixels, alloc))
+    }
+
+    /// **位图渲染目标**（RPG Maker 的 `Bitmap.new(w,h)`）：独占一整页、可被画。
+    ///
+    /// 没有 CPU 像素（`is_pending()` 恒 false，故永不进上传队列），内容只由
+    /// `Renderer` 的绘制会话写入。页尺寸 = 请求尺寸（不抬到 2 的幂），所以
+    /// `uv_rect()` 就是整个 `[0,1]²`。
+    pub fn new_target(
+        &self,
+        width: u32,
+        height: u32,
+        now_frame: u64,
+    ) -> Result<Bitmap, LayoutError> {
+        let epoch = self
+            .shared
+            .layout
+            .lock()
+            .unwrap()
+            .allocate_target(width, height, now_frame)?;
+        let alloc = Allocation {
+            region: Region {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
+            upload: Region {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
+        };
+        Ok(self.finish_bitmap(epoch, width, height, Vec::new(), alloc))
     }
 
     fn finish_bitmap(
@@ -196,26 +245,33 @@ impl Atlas {
         width: u32,
         height: u32,
         pixels: Vec<u8>,
-        region: Region,
+        alloc: Allocation,
     ) -> Bitmap {
-        debug_assert_eq!(
-            pixels.len(),
-            usize::try_from(u64::from(width) * u64::from(height) * 4).unwrap(),
-            "像素缓冲必须是 width*height*4"
+        debug_assert!(
+            pixels.is_empty()
+                || pixels.len()
+                    == usize::try_from(u64::from(width) * u64::from(height) * 4).unwrap(),
+            "像素缓冲必须是 width*height*4（空 = RT 页，没有 CPU 像素）"
         );
+        let layout = self.shared.layout.lock().unwrap();
         Bitmap {
             inner: Arc::new(BitmapInner {
                 shared: Arc::downgrade(&self.shared),
                 epoch,
-                rect: [region.x, region.y, width, height],
-                page_size: self
-                    .shared
-                    .layout
-                    .lock()
-                    .unwrap()
-                    .page_size(epoch)
-                    .expect("刚分配的页一定在"),
-                staging: Mutex::new(Some(pixels)),
+                kind: PageKind::of_epoch(epoch),
+                rect: [alloc.region.x, alloc.region.y, width, height],
+                upload: [
+                    alloc.upload.x,
+                    alloc.upload.y,
+                    alloc.upload.width,
+                    alloc.upload.height,
+                ],
+                page_size: layout.page_size(epoch).expect("刚分配的页一定在"),
+                staging: Mutex::new(if pixels.is_empty() {
+                    None
+                } else {
+                    Some(pixels)
+                }),
             }),
         }
     }
@@ -239,8 +295,11 @@ impl Default for Atlas {
 struct BitmapInner {
     shared: Weak<AtlasShared>,
     epoch: u64,
-    /// `[x, y, w, h]`，页内像素坐标。
+    kind: PageKind,
+    /// `[x, y, w, h]`，页内像素坐标（不含 gutter）。
     rect: [u32; 4],
+    /// 含 gutter 的上传矩形 `[x, y, w, h]`；RT/旁路页与 `rect` 相同。
+    upload: [u32; 4],
     page_size: (u32, u32),
     /// 上传前暂存的像素；`upload` 后置 None。
     staging: Mutex<Option<Vec<u8>>>,
@@ -258,12 +317,22 @@ impl Bitmap {
     }
 
     pub fn is_large(&self) -> bool {
-        self.inner.epoch & LARGE_EPOCH != 0
+        self.inner.kind == PageKind::Large
     }
 
-    /// 页内矩形 `[x, y, w, h]`。
+    /// 是否可作绘制目标（`Atlas::new_target` 造的页）。
+    pub fn is_target(&self) -> bool {
+        self.inner.kind == PageKind::Target
+    }
+
+    /// 页内矩形 `[x, y, w, h]`（采样用，不含 gutter）。
     pub fn rect(&self) -> [u32; 4] {
         self.inner.rect
+    }
+
+    /// 含 gutter 的上传矩形 `[x, y, w, h]`（GPU 侧写入范围，比 `rect` 大一圈）。
+    pub fn upload_rect(&self) -> [u32; 4] {
+        self.inner.upload
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -322,6 +391,7 @@ impl std::fmt::Debug for Bitmap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Bitmap")
             .field("epoch", &self.inner.epoch)
+            .field("kind", &self.inner.kind)
             .field("rect", &self.inner.rect)
             .field("page_size", &self.inner.page_size)
             .field("pending", &self.is_pending())
@@ -356,6 +426,7 @@ pub struct UploadRing {
 
 const ROW_ALIGN: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT; // 256
 const MIN_STAGING: u64 = 1 << 16;
+const PIX: usize = 4;
 
 impl UploadRing {
     pub fn new() -> Self {
@@ -369,10 +440,17 @@ impl UploadRing {
     }
 
     /// 排入一个位图的上传（像素还躺在 `Bitmap` 的 staging 里）。
+    ///
+    /// 渲染目标没有 CPU 像素，排队即忽略（它的内容由绘制会话负责）。
     pub fn queue(&mut self, bitmap: Bitmap) {
+        if !bitmap.is_pending() {
+            return;
+        }
         let [_, _, w, h] = bitmap.rect();
-        let bytes_per_row = (w * 4).next_multiple_of(ROW_ALIGN);
-        let size = u64::from(bytes_per_row) * u64::from(h);
+        let [_, _, uw, uh] = bitmap.upload_rect();
+        debug_assert!(uw >= w && uh >= h, "上传矩形必须包住采样矩形");
+        let bytes_per_row = (uw * PIX as u32).next_multiple_of(ROW_ALIGN);
+        let size = u64::from(bytes_per_row) * u64::from(uh);
         let offset = self.bytes_used;
         self.bytes_used += size;
         self.jobs.push(CopyJob {
@@ -415,28 +493,14 @@ impl UploadRing {
             self.staging.resize(used, 0);
         }
         for job in &self.jobs {
-            let [_, _, w, h] = job.bitmap.rect();
-            let guard = job.bitmap.inner.staging.lock().unwrap();
-            let pixels = guard
-                .as_ref()
-                .expect("同一位图不允许二次上传（上传后像素已释放）");
-            let row_bytes = usize::try_from(u64::from(w) * 4).unwrap();
-            debug_assert_eq!(
-                pixels.len(),
-                row_bytes * usize::try_from(u64::from(h)).unwrap()
-            );
-            for row in 0..h {
-                let dst = (job.staging_offset + u64::from(row * job.bytes_per_row)) as usize;
-                let src = usize::try_from(u64::from(row) * 4 * u64::from(w)).unwrap();
-                self.staging[dst..dst + row_bytes].copy_from_slice(&pixels[src..src + row_bytes]);
-            }
+            job.write_rows(&mut self.staging);
         }
         let buffer = self.buffer.as_ref().expect("刚确保过容量");
         queue.write_buffer(buffer, 0, &self.staging[..used]);
         let mut encoder = device.create_command_encoder(&Default::default());
         for job in &self.jobs {
             let epoch = job.bitmap.epoch();
-            let [x, y, w, h] = job.bitmap.rect();
+            let [x, y, w, h] = job.bitmap.upload_rect();
             let texture = pages
                 .get(epoch)
                 .unwrap_or_else(|| panic!("epoch {epoch} 没有页纹理（synchronize 没跑？）"));
@@ -469,6 +533,41 @@ impl UploadRing {
         }
         self.jobs.clear();
         self.bytes_used = 0;
+    }
+}
+
+impl CopyJob {
+    /// 把 CPU 像素**按行**摊进 staging，顺带把 1px gutter 复制出来。
+    ///
+    /// 上传矩形比采样矩形宽/高各 `2*GUTTER`，多出来的那一圈取"最近的内层像素"
+    /// （边缘复制），于是线性采样跨出子矩形时读到的是自己的边缘色而不是隔壁的图。
+    fn write_rows(&self, staging: &mut [u8]) {
+        let [ix, iy, w, h] = self.bitmap.rect();
+        let [ux, uy, uw, uh] = self.bitmap.upload_rect();
+        let guard = self.bitmap.inner.staging.lock().unwrap();
+        let pixels = guard
+            .as_ref()
+            .expect("同一位图不允许二次上传（上传后像素已释放）");
+        let row_bytes = usize::try_from(u64::from(uw) * PIX as u64).unwrap();
+        debug_assert_eq!(
+            pixels.len(),
+            usize::try_from(u64::from(w) * u64::from(h) * PIX as u64).unwrap()
+        );
+        for row in 0..uh {
+            // 目标行的绝对页行号夹回内层 [0,h)：上/下 gutter 行因此复制第一/最后一行。
+            let sy = (uy + row).saturating_sub(iy).clamp(0, h.saturating_sub(1));
+            let dst =
+                usize::try_from(self.staging_offset + u64::from(row * self.bytes_per_row)).unwrap();
+            let src_row = usize::try_from(u64::from(sy * w) * PIX as u64).unwrap();
+            let (dst, src) = (&mut staging[dst..dst + row_bytes], &pixels[src_row..]);
+            for x in 0..uw {
+                // 同理按列夹回 [0,w)，左右 gutter 各复制本行的边缘像素。
+                let sx = (ux + x).saturating_sub(ix).clamp(0, w.saturating_sub(1));
+                let at = usize::try_from(u64::from(x) * PIX as u64).unwrap();
+                let from = usize::try_from(u64::from(sx) * PIX as u64).unwrap();
+                dst[at..at + PIX].copy_from_slice(&src[from..from + PIX]);
+            }
+        }
     }
 }
 
@@ -545,21 +644,46 @@ mod tests {
 
     #[test]
     fn queue_aligns_rows_to_wgpu_rule() {
-        // 17×13：bytes_per_row 必须从 68 抬到 256 的倍数；第二单的偏移跟着走。
+        // 17×13 含 gutter 是 19×15：bytes_per_row 必须从 76 抬到 256 的倍数；
+        // 第二单的偏移跟着上传矩形（不是采样矩形）走。
         let atlas = Atlas::with_limits(256, 2);
         let a = atlas
-            .new_bitmap(17, 13, solid(17, 13, [9, 9, 9, 255]), 0)
+            .new_bitmap(17, 13, solid(17, 13, [255, 0, 0, 255]), 0)
             .unwrap();
         let b = atlas
             .new_bitmap(17, 13, solid(17, 13, [8, 8, 8, 255]), 0)
             .unwrap();
+        assert_eq!(a.upload_rect(), [0, 0, 19, 15]);
+        assert_eq!(a.rect(), [1, 1, 17, 13]);
         let mut uploads = UploadRing::new();
         uploads.queue(a);
         uploads.queue(b);
         assert_eq!(uploads.pending(), 2);
         assert_eq!(uploads.jobs[0].bytes_per_row, ROW_ALIGN);
-        assert_eq!(uploads.jobs[1].staging_offset, u64::from(ROW_ALIGN) * 13);
-        assert_eq!(uploads.bytes_used, u64::from(ROW_ALIGN) * 13 * 2);
+        assert_eq!(uploads.jobs[1].staging_offset, u64::from(ROW_ALIGN) * 15);
+        assert_eq!(uploads.bytes_used, u64::from(ROW_ALIGN) * 15 * 2);
+    }
+
+    /// 渲染目标没有 CPU 像素：既不该排上传，也不该被当成普通图混用。
+    #[test]
+    fn target_bitmaps_queue_nothing_and_report_their_kind() {
+        let atlas = Atlas::with_limits(256, 2);
+        let t = atlas.new_target(320, 200, 0).expect("RT 分配");
+        assert!(t.is_target());
+        assert!(!t.is_large());
+        assert!(!t.is_pending(), "RT 没有 CPU 像素");
+        assert_eq!(t.size(), (320, 200));
+        assert_eq!(t.page_size(), (320, 200), "RT 页尺寸必须精确，否则 uv 会偏");
+        assert_eq!(t.uv_rect(), [0.0, 0.0, 1.0, 1.0]);
+        let mut uploads = UploadRing::new();
+        uploads.queue(t.clone());
+        assert_eq!(uploads.pending(), 0, "RT 排队即忽略");
+        // RT 与分桶小页互不干扰。
+        let b = atlas
+            .new_bitmap(64, 64, solid(64, 64, [1, 2, 3, 255]), 0)
+            .unwrap();
+        assert_ne!(b.epoch(), t.epoch());
+        assert!(!b.is_target());
     }
 
     #[test]
@@ -690,16 +814,27 @@ mod gpu_tests {
         assert_eq!(uploads.pending(), 0);
         assert!(!bitmap.is_pending(), "上传后 CPU 像素应释放给 GPU 独占");
 
-        let [ox, oy, _, _] = bitmap.rect();
+        let [ix, iy, _, _] = bitmap.rect();
+        let [ux, uy, uw, uh] = bitmap.upload_rect();
         let (pw, ph) = atlas.shared.page_size(epoch).expect("页还活着");
         let (pitch, data) = read_page(&device, &queue, &pages, epoch);
+        let src = |x: u32, y: u32| {
+            let i = usize::try_from(u64::from(y * w + x) * 4).unwrap();
+            &pixels[i..i + 4]
+        };
         for y in 0..ph {
             for x in 0..pw {
                 let i = usize::try_from(u64::from(y * pitch + x * 4)).unwrap();
                 let got = &data[i..i + 4];
-                if x >= ox && y >= oy && x - ox < w && y - oy < h {
-                    let src = usize::try_from(u64::from((y - oy) * w + (x - ox)) * 4).unwrap();
-                    assert_eq!(got, &pixels[src..src + 4], "像素 ({x},{y}) 不一致");
+                let in_inner = x >= ix && y >= iy && x - ix < w && y - iy < h;
+                let in_upload = x >= ux && y >= uy && x - ux < uw && y - uy < uh;
+                if in_inner {
+                    assert_eq!(got, src(x - ix, y - iy), "像素 ({x},{y}) 不一致");
+                } else if in_upload {
+                    // gutter：夹回最近的内层像素。
+                    let gx = (ux + (x - ux)).saturating_sub(ix).min(w - 1);
+                    let gy = (uy + (y - uy)).saturating_sub(iy).min(h - 1);
+                    assert_eq!(got, src(gx, gy), "gutter ({x},{y}) 没按边缘复制");
                 } else {
                     assert_eq!(got, &[0, 0, 0, 0], "页空白区被写坏 ({x},{y})");
                 }
@@ -707,7 +842,7 @@ mod gpu_tests {
         }
     }
 
-    /// 同页两张不同尺寸：验证 staging 里多 job 的偏移互不覆盖。
+    /// 同页两张图：一张的 gutter 只能包含自己的边缘色，绝不与邻图内容混。
     #[test]
     fn upload_two_bitmaps_to_one_page_keeps_both() {
         let (device, queue) = pollster::block_on(headless_device());
@@ -740,5 +875,61 @@ mod gpu_tests {
                 );
             }
         }
+        // b 的左侧 gutter 列（px-1）必须等于 b 自己的第一列，而不是 a 的边缘。
+        let [_, _, _, ah] = a.rect();
+        let b_left_gutter = usize::try_from(u64::from(py * pitch + (px - 1) * 4)).unwrap();
+        let b_first_col = usize::try_from(u64::from(py * pitch + px * 4)).unwrap();
+        assert_eq!(
+            &data[b_left_gutter..b_left_gutter + 4],
+            &data[b_first_col..b_first_col + 4],
+            "b 的左 gutter 复制的应是 b 自己的边缘"
+        );
+        // a 占据页首，它的右下角之外（既不在 a 也不在 b 里）仍是透明的。
+        let [ax, ay, _, _] = a.rect();
+        let outside = usize::try_from(u64::from((ay + ah + 3) * pitch + ax * 4)).unwrap();
+        assert_eq!(
+            &data[outside..outside + 4],
+            &[0, 0, 0, 0],
+            "两图之外不该被写"
+        );
+    }
+
+    /// RT 页建出来必须真能当 render pass 目标（`RENDER_ATTACHMENT`），
+    /// 且尺寸精确——否则"画进位图"这条通路在 golden 之前就断了。
+    #[test]
+    fn target_page_is_renderable_and_exact() {
+        let (device, _queue) = pollster::block_on(headless_device());
+        let atlas = Atlas::with_limits(256, 4);
+        let rt = atlas.new_target(100, 60, 0).expect("RT 分配");
+        let mut pages = AtlasPages::new();
+        let (created, _) = pages.synchronize(&device, &atlas);
+        assert_eq!(created.len(), 1);
+        let texture = pages.get(rt.epoch()).expect("RT 页纹理");
+        assert_eq!(texture.size().width, 100);
+        assert_eq!(texture.size().height, 60);
+        assert!(
+            texture
+                .usage()
+                .contains(wgpu::TextureUsages::RENDER_ATTACHMENT),
+            "RT 页必须可画，实际 usage={:?}",
+            texture.usage()
+        );
+        // 直接开一个 pass 打清屏色，证明驱动接受这块纹理。
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("rt-probe"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &created[0].1,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        drop(pass);
+        _queue.submit([encoder.finish()]);
     }
 }

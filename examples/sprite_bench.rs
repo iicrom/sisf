@@ -52,7 +52,7 @@ const SOURCES: [&str; 4] = [
     "img_24x18_24bpp.bmp",
 ];
 
-/// wasm 预取清单：一行一个路径（构建期生成，内容同 `web/assets/manifest.txt`）。
+/// wasm 预取清单：一行一个路径，是 `web/assets/manifest.txt` 里本示例要用的那一子集。
 #[cfg(target_arch = "wasm32")]
 const MANIFEST: &str = "img_64x48.png\nimg_80x60.jpg\nimg_40x40.webp\nimg_24x18_24bpp.bmp\n";
 
@@ -541,6 +541,7 @@ impl App for Bench {
             renderer.push(
                 BatchKey {
                     layer: 0,
+                    clip: 0,
                     epoch,
                     blend: if s.add { Blend::Add } else { Blend::Normal },
                     z: (i as i32) & 1023,

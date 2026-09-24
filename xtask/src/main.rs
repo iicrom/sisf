@@ -5,7 +5,7 @@
 //! - `fmt`        `cargo fmt --all`（附加 `--check` 透传）
 //! - `clippy`     workspace clippy（win + wasm，`-D warnings`）
 //! - `web`        构建 wasm 示例（`cargo xtask web [示例名]`，缺省 `hello_window`）+ wasm-bindgen + 本地静态服务
-//! - `golden`     离屏 sprite golden 比对（`cargo xtask golden [--bless]`，仅本机 Windows 生效）
+//! - `golden`     离屏 golden 比对（`cargo xtask golden [--bless]`，跑 `GOLDENS` 里全部场景，仅本机 Windows 生效）
 //! - `wasm-test`  wasm-pack 浏览器测试（T12 实装）
 //! - `android`    cargo-ndk 构建 + adb 安装（T12 实装）
 
@@ -18,6 +18,11 @@ use std::process::{Command, exit};
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
 const ANDROID_TARGET: &str = "aarch64-linux-android";
 const WEB_PORT: u16 = 8080;
+/// 离屏 golden 测试清单：`(crate, 测试文件)`，`cargo xtask golden` 逐个跑。
+const GOLDENS: &[(&str, &str)] = &[
+    ("sisf-sprite", "golden_sprite"),
+    ("sisf-text", "golden_text"),
+];
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -77,10 +82,10 @@ fn check(cmd: &[&str]) -> i32 {
     status.code().unwrap_or(1)
 }
 
-/// 离屏 golden：跑 `sisf-sprite` 的 golden 场景，与 `tests/golden/` 基线逐通道比对。
+/// 离屏 golden：跑各 crate 的 golden 场景，与 `tests/golden/` 基线逐通道比对。
 /// `--bless` 刷新基线（首次落图也用这个）。
 ///
-/// 该测试整个 `#![cfg(windows)]`：wgpu 30 没有软件光栅后端，离屏同样要真 adapter，
+/// 这些测试整个 `#![cfg(windows)]`：wgpu 30 没有软件光栅后端，离屏同样要真 adapter，
 /// 所以在其它平台会编译成 0 个用例并通过 —— 只有本机有 DX12/Vulkan 时才是真比对。
 fn golden(rest: &[String]) -> i32 {
     let mut bless = false;
@@ -93,23 +98,30 @@ fn golden(rest: &[String]) -> i32 {
             }
         }
     }
-    println!(
-        "==> cargo test -p sisf-sprite --test golden_sprite{}",
+    for (package, test) in GOLDENS {
+        println!(
+            "==> cargo test -p {package} --test {test}{}",
+            if bless {
+                "  (bless：重写基线)"
+            } else {
+                ""
+            }
+        );
+        let mut cmd = Command::new("cargo");
+        cmd.args(["test", "-p", package, "--test", test]);
         if bless {
-            "  (bless：重写基线)"
-        } else {
-            ""
+            cmd.env("SISF_GOLDEN", "bless");
         }
-    );
-    let mut cmd = Command::new("cargo");
-    cmd.args(["test", "-p", "sisf-sprite", "--test", "golden_sprite"]);
-    if bless {
-        cmd.env("SISF_GOLDEN", "bless");
+        let status = cmd
+            .status()
+            .unwrap_or_else(|e| panic!("无法启动 cargo: {e}"));
+        let code = status.code().unwrap_or(1);
+        if code != 0 {
+            eprintln!("golden 在 {package}/{test} 失败");
+            return code;
+        }
     }
-    let status = cmd
-        .status()
-        .unwrap_or_else(|e| panic!("无法启动 cargo: {e}"));
-    status.code().unwrap_or(1)
+    0
 }
 
 fn check_all() -> i32 {

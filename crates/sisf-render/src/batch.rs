@@ -9,6 +9,11 @@ pub enum Blend {
     Normal,
     /// 加法发光。
     Add,
+    /// **直接替换**目标像素（不做混合）。只为 `clear_rect` 存在：
+    /// 一个 alpha=0 的矩形经它写出去就是"该矩形透明"，从而不需要 wgpu 的
+    /// 区域 clear（`CommandEncoder::clear_texture` 只能清整个 subresource）。
+    /// 精灵语义里不用它（RPG Maker 的 `blt` 是 source-over）。
+    Replace,
 }
 
 impl Blend {
@@ -16,6 +21,7 @@ impl Blend {
         match self {
             Self::Normal => 0,
             Self::Add => 1,
+            Self::Replace => 2,
         }
     }
 }
@@ -27,6 +33,11 @@ impl Blend {
 pub struct BatchKey {
     /// viewport 栈索引（0..7）。
     pub layer: u8,
+    /// 裁剪代号（`Renderer::clip_id`，0 = 不裁剪）。
+    ///
+    /// 由 `Renderer::push` 在提交时注入，采集端不必（也不该）自己填：裁剪是**帧内**
+    /// 状态，只有渲染器知道当前栈顶。它排在 `epoch` 之前 ⇒ clip 一变即断批（= flush）。
+    pub clip: u32,
     /// 纹理代号（T4 起由图集页/RT 提供；相同 epoch 才能共享 bind group）。
     pub epoch: u64,
     pub blend: Blend,
@@ -38,9 +49,10 @@ pub struct BatchKey {
 
 impl BatchKey {
     /// 排序键（展开成元组，避免手写比较漏字段）。
-    const fn order(self) -> (u8, u64, u8, i32, u32) {
+    const fn order(self) -> (u8, u32, u64, u8, i32, u32) {
         (
             self.layer,
+            self.clip,
             self.epoch,
             self.blend.as_u8(),
             self.z,
@@ -49,8 +61,8 @@ impl BatchKey {
     }
 
     /// 合批键：相邻两项相等则可并入同一批。
-    const fn group(self) -> (u8, u64, u8) {
-        (self.layer, self.epoch, self.blend.as_u8())
+    const fn group(self) -> (u8, u32, u64, u8) {
+        (self.layer, self.clip, self.epoch, self.blend.as_u8())
     }
 }
 
@@ -58,6 +70,8 @@ impl BatchKey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Batch {
     pub layer: u8,
+    /// 该批生效的裁剪代号（`u32::MAX` = 跟随目标，见 `clip` 模块）。
+    pub clip: u32,
     pub epoch: u64,
     pub blend: Blend,
     /// 槽内起始实例下标。
@@ -112,11 +126,33 @@ impl<I> BatchList<I> {
         self.items.clear();
     }
 
+    /// 把全部实例的裁剪代号重填为 `clip`（并入别的目标前用；`insertion` 保持不变，
+    /// 所以同键实例的相对顺序还是提交顺序）。
+    pub fn set_clip(&mut self, clip: u32) {
+        for (key, _) in self.items.iter_mut() {
+            key.clip = clip;
+        }
+    }
+
     /// 排序并切成批次。`capacity` = 环形缓冲单槽可容纳的实例数；
     /// 一段同键实例跨越槽边界时按边界拆成两批（写满先 flush 再续）。
     pub fn build(&mut self, capacity: u32) -> Vec<Batch> {
-        assert!(capacity > 0, "batch capacity must be non-zero");
         self.items.sort_unstable_by_key(|(key, _)| key.order());
+        self.group_runs(capacity)
+    }
+
+    /// **不排序**地成批：只把相邻的同组项合并。
+    ///
+    /// 位图绘制会话（`begin_draw`/`end_draw`）用这条：RPG Maker 的
+    /// `fill_rect → blt → draw_text` 是**指令顺序即覆盖顺序**，若按 `(epoch, blend)`
+    /// 排序会把"先贴的图"排到"后填的矩形"下面。代价是相邻两指令即便同组也要求
+    /// 提交顺序相邻才合批——绘制会话的指令数很小，这个代价可以接受。
+    pub fn build_in_order(&mut self, capacity: u32) -> Vec<Batch> {
+        self.group_runs(capacity)
+    }
+
+    fn group_runs(&self, capacity: u32) -> Vec<Batch> {
+        assert!(capacity > 0, "batch capacity must be non-zero");
         let mut out: Vec<Batch> = Vec::new();
         // (段首键, 段首下标, 段长)
         let mut cur: Option<(BatchKey, u32, u32)> = None;
@@ -157,6 +193,7 @@ impl<I> BatchList<I> {
 fn batch_of(key: BatchKey, start: u32, len: u32, capacity: u32) -> Batch {
     Batch {
         layer: key.layer,
+        clip: key.clip,
         epoch: key.epoch,
         blend: key.blend,
         start: start % capacity,
@@ -172,6 +209,7 @@ mod tests {
     fn key(layer: u8, epoch: u64, blend: Blend, z: i32) -> BatchKey {
         BatchKey {
             layer,
+            clip: 0,
             epoch,
             blend,
             z,
@@ -189,6 +227,62 @@ mod tests {
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].len, 5);
         assert_eq!(batches[0].epoch, 7);
+    }
+
+    /// clip 在合批键里排在 epoch 之前：同图同 blend、只是裁剪不同，也必须断批。
+    #[test]
+    fn clip_change_breaks_batch() {
+        let mut list: BatchList<u32> = BatchList::new();
+        for (i, clip) in [0u32, 1, 0].iter().enumerate() {
+            list.push(
+                BatchKey {
+                    layer: 0,
+                    clip: *clip,
+                    epoch: 3,
+                    blend: Blend::Normal,
+                    z: 0,
+                    insertion: 0,
+                },
+                i as u32,
+            );
+        }
+        let batches = list.build_in_order(u32::MAX);
+        let shape: Vec<(u32, u32)> = batches.iter().map(|b| (b.clip, b.len)).collect();
+        assert_eq!(shape, vec![(0, 1), (1, 1), (0, 1)], "clip 变化处必须断批");
+    }
+
+    /// 绘制会话按提交顺序成批：跨 epoch 的相邻指令不会像 `build` 那样被重排。
+    #[test]
+    fn build_in_order_keeps_submission_order_across_epochs() {
+        let mut list: BatchList<&'static str> = BatchList::new();
+        list.push(key(0, 9, Blend::Normal, 0), "atlas");
+        list.push(key(0, 0, Blend::Replace, 0), "clear");
+        list.push(key(0, 9, Blend::Normal, 0), "atlas again");
+        let sorted: Vec<u64> = list.build(u32::MAX).iter().map(|b| b.epoch).collect();
+        assert_eq!(
+            sorted,
+            vec![0, 9],
+            "build 会按 epoch 重排：两条 atlas 指令被拉到一起合成一批"
+        );
+        let mut list2: BatchList<&'static str> = BatchList::new();
+        list2.push(key(0, 9, Blend::Normal, 0), "atlas");
+        list2.push(key(0, 0, Blend::Replace, 0), "clear");
+        list2.push(key(0, 9, Blend::Normal, 0), "atlas again");
+        let runs: Vec<(u64, Blend, u32)> = list2
+            .build_in_order(u32::MAX)
+            .iter()
+            .map(|b| (b.epoch, b.blend, b.len))
+            .collect();
+        assert_eq!(
+            runs,
+            vec![
+                (9, Blend::Normal, 1),
+                (0, Blend::Replace, 1),
+                (9, Blend::Normal, 1)
+            ],
+            "同键但不相邻 ⇒ 三条批，顺序即提交顺序"
+        );
+        assert_eq!(list2.sorted_items()[0].1, "atlas");
     }
 
     #[test]

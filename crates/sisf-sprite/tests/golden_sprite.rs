@@ -8,8 +8,9 @@
 //! 基线缺失或 `SISF_GOLDEN=bless` 时写出 `tests/golden/sprite_scene.png` 并通过，
 //! 否则读基线比对，单通道误差 > [`TOL`] 即失败并打印第一处差异。
 //!
-//! 采样点一律取在象限/单元格中心：图集页是 Linear 采样，`src` 边界最后半个纹素会采到
-//! 邻居（放大时尤其明显），所以不做边缘精确断言（该现象记在 `docs/sprite.md`）。
+//! 采样点仍一律取在象限/单元格中心：T6 起装箱带 1px gutter，边界的半纹素渗色已经没了
+//! （基线为此重写过，见 `docs/sprite.md`），但旋转/缩放的格点取整本身就有 ±1 抖动，
+//! 取格心最稳。
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
