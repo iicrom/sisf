@@ -116,6 +116,12 @@ cargo xtask web tiled_map # 换示例：不带示例名时缺省只构建 hello_
 
 - 打开 `http://127.0.0.1:8080/index.html`：WebGPU 优先。
 - 打开 `http://127.0.0.1:8080/index.html?wgl`：强制 WebGL2 回退（`requested_backends()` 读 URL）。
+- **响应带 `Cache-Control: no-store`**：这个服务不发 `ETag`/`Last-Modified`，浏览器只能启发式缓存，
+  于是改完重编后**普通刷新（F5）还在跑旧的 32MB wasm**，看着完全像"修了没生效"。开发服务宁可每次读盘。
+- **网页上示例的倍率恒为 1.00**：winit 的 `set_canvas_size` 只写 canvas 的 **CSS style**，不动
+  `width/height` 属性（`winit-0.30.13/src/platform_impl/web/web_sys/mod.rs:71-85`），而
+  `web/index.html` 把属性钉成 544×416 ⇒ 物理尺寸永远是 544×416、`IntegerFit` 只能给出 1×。
+  要看 2× 的设备格点只能开桌面窗口（例如 1185×862 ⇒ 倍率 2.00）。
 - `visibilitychange` 映射为挂起：页面隐藏时上报 `Lifecycle::Suspended` 并停帧，
   浏览器暂停 rAF 也不会吃时间（累加器在 T8 同样冻结）。
 - 需要 `hello_window_bg.wasm` 的 MIME 为 `application/wasm`（xtask 内置服务已处理）。

@@ -484,6 +484,21 @@
     像素 100% 相同"看着像"画面根本没动"，而应用自己的带时间戳日志证明它在动。像素探针的前提是
     页面真的在前台合成；不能确认时改用应用侧的逐帧计数/时间戳日志（离线复放同样能出第 20 条的
     判据）。附：逐帧 `console.log` 本身会扰动节拍（Heisenbug），聚合到 96 帧一批再打。
+23. **"刷新后没有变化"先怀疑产物没到货，而不是修复没生效**：`xtask` 的静态服务原先不发任何缓存头
+    （也没 `ETag`/`Last-Modified`）⇒ 浏览器对那个 32MB 的 `pkg/*_bg.wasm` 做**启发式缓存**，普通刷新
+    （F5）直接用磁盘上的旧副本，旧代码的"收尾拍重播最后一步"（= 每格往反方向弹一下）当然还在。
+    修法 = 响应加 `Cache-Control: no-store`（开发服务宁可每次读盘），复验一律先看 console 里
+    `物理 …倍率 …` 那行是不是新的。同一次查清的第二件事：**winit 0.30.13 的 `set_canvas_size` 只写
+    canvas 的 CSS style，不改 `width`/`height` 属性**
+    （`platform_impl/web/web_sys/mod.rs:71-85`），而 `web/index.html` 把属性钉成 544×416 ⇒
+    **网页上 `IntegerFit` 只能算出倍率 1.00**（不管 DPR 是多少），2× 的设备格点那条路只有桌面窗口
+    拉大才会走到。所以"网页抖"绝不能拿 2× 单测当解释。
+24. **"相机回退"已经穷举排除，别再往这个方向查**：把 `TickClock` 的逐帧差分
+    （读 `cam × scale`）在 **2 个倍率（1×/2×）× 4 个方向 × {60.00/59.94/120/144Hz, 实测乱拍}** 上跑
+    200 帧，**回退次数恒为 0**；分布里那些 `0` 是相机夹边（`cam ∈ [0,224]`，从出生格 12,12 走到边
+    正好 92/64/20/48 帧），不是停顿。60Hz 下是完美的每帧 -2 设备像素，144Hz 下是 -1/0 交替（18% 空帧
+    = 固定 60Hz 步长在高刷新上的固有顿挫，不是回弹）。真要看回弹只剩两条源：旧产物（第 23 条）与
+    `TickClock::reset()`/`MAX_CATCHUP` 丢时间后 `alpha` 从 1 掉回小值那一帧（各 1~2px，一次性）。
 
 ## T9 引擎事件总线 + 输入映射
 - [ ] `sisf-event/src/bus.rs`：`EngineEvent{Action,Key{code,kind,ch},Pointer{kind,pos,button,delta},Lifecycle,Custom(u32,serde_json::Value)}` + `EngineBus{push,drain}`。验收：drain 顺序单测。

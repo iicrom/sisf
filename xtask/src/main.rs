@@ -349,8 +349,10 @@ fn handle_http(mut stream: TcpStream, dir: &Path) {
         "css" => "text/css",
         _ => "application/octet-stream",
     };
+    // `no-store` 是有意的：这里没有 `ETag`/`Last-Modified` 之类的验证器，浏览器只能启发式缓存，
+    // 于是改完代码重编后普通刷新还在跑旧的 32MB wasm（看着像"修了没生效"）。开发服务宁可每次都读盘。
     let head = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
         bytes.len()
     );
     let _ = stream.write_all(head.as_bytes());
