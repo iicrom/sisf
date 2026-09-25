@@ -368,8 +368,10 @@
   `cargo xtask check-all` 四组 0 warning、`cargo test --workspace --all-features` **245 绿 0 红**
   （较上条 +5：上面四条新单测 + `the_camera_never_steps_backwards_in_any_direction`
   由临时扫描转正；`--example tiled_map` 15 → **17 绿**，`sisf-sprite --lib` 48 → **51 绿**）、
-  `cargo xtask golden` 两条全绿。桌面/wasm 的肉眼复验：⏳ 待用户确认（`cargo xtask web` 的探针已按约定
-  还原，wasm 侧帧时长那条是另一件事，见"残余问题"）。
+  `cargo xtask golden` 两条全绿。用户肉眼复验（2026-09-25）：**"解决了"** —— 桌面与浏览器两条链路
+  都由用户自己看过，本次不再需要逐帧读数。剩下的是另一件事：帧节奏（debug native 约 7.6% 帧
+  ≥2 vsync；`cargo xtask web` 出的是 debug wasm 32.5MB vs release 8.2MB —— 要不要让它默认
+  `--release` 待定，见下"残余问题"）。
 - 验收（整段）：anim/route/timing 单测 + tiled_map → 提交 `P7 anim+route+tick`。→ 落地说明见 `docs/sprite.md`「T8：固定拍上的动画与任务」（两条互斥动画通路的分工表、任务三约定、`dir()/step()` 是动画状态）+ `docs/platforms.md`（letterbox 只管投影不管裁剪、HUD 必须挂更高 viewport 层）+ `docs/text.md`（文字层号：`draw_text_at`）。闸门（都用原命令）：`cargo xtask fmt --check` 净、`cargo xtask clippy`（win `--all-targets -D warnings` + wasm32 web）0 warning、`cargo xtask check-all` 四组 0 warning、`cargo test --workspace --all-features` 全绿 0 红、`cargo xtask golden` 全绿（文字基线不受新参数影响）。
 
 ### T8 期间发现并修正的事实（供后续阶段引用）
