@@ -60,6 +60,28 @@ cargo run -p sisf --example hello_window
 钉成单测 `the_following_camera_shares_the_hero_s_interpolation_phase`（含对照组：拍尾相机在
 alpha 0/0.5 下的错位恰好是 2/1 虚拟像素）。
 
+**同相位只是必要条件的一半：那个点还得落在像素格点上**（T8 复盘第二步）。把相机改成跟随
+`interpolated(alpha)` 之后，"人物在抖"变成了"整个地图在抖"（左右移动时左右晃、上下移动时上下
+晃）。原因是图集采样器是 `FilterMode::Linear`（`crates/sisf-render/src/renderer.rs`），相机平移量
+一带小数，地图那些本来对齐在物理像素上的整数格点就整体落到纹素中间被重采样 —— 每一根硬边缘
+都被摊开成两个像素，且摊开的比例随 `alpha` 每帧变化，于是满屏呼吸。`nearest` 也躲不掉：它把
+每个采样点四舍五入回纹素，边缘不糊了，但整张图会随小数部分在两个像素位置之间跳。
+
+像素美术的跟随相机因此不能拿真亚像素的 `alpha` 用：`examples/tiled_map.rs` 加了 `lattice_alpha`
+（`(alpha × 每拍位移).round() / 每拍位移`），把插值折到 1px 台阶上 —— `SPEED = 2` 一拍走两步。
+角色与地图同时落在格点上，两者相对位置仍然精确，代价只是位移按整像素分级（正是像素美术该有的
+走法）。前提是每拍位移与格点都是整数；要用真亚像素滚动，得先把采样器换成 `Nearest` 并接受
+1px 跳动，或给相机做时间抖动（T10 的 `filter` 选择权一并考虑）。
+钉成单测 `the_following_camera_snaps_the_world_to_the_pixel_lattice`。浏览器侧的判据不是"看着
+晃不晃"，而是**相邻两帧能否用一个整数位移对齐**（逐 rAF 把 canvas 画进离屏 2D 再 `getImageData`，
+在 `dx ∈ -8..8` 上找最小差异比例）：取整后 59 对相邻帧平均 0.13%、最大 0.18% 差异，最佳位移恒为
+`dx = 2`（偶尔 1/3，从不为负）；把 `lattice_alpha` 临时换成恒等函数复测同一探针，平均 17.16%、
+最大 19.89% 对不齐，且每帧的 distinct 颜色数从 41 涨到 64~145 —— 那些多出来的颜色就是重采样
+混出来的中间色。纵向（ArrowUp）同一探针：平均 0.21%、最大 0.34%，`dy` 恒为 2~3。
+⚠️ 探针本身有个坑：WebGL canvas 未开 `preserveDrawingBuffer`，在应用自己的 rAF 之外读到的可能
+是已清空的缓冲（表现为"两帧之间 18.9% 的像素变了、却任何位移都对不齐"）。按 distinct 颜色数
+把空帧滤掉再算，否则测的是读回伪影而不是画面。
+
 > 呈现验证提示：Windows 上若显卡走硬件覆盖合成（MPO / flip-model），`BitBlt`/`PrintWindow`
 > 抓到的客户区可能是白色占位，而屏幕上实际有内容。因此"清屏色是否正确"由
 > `crates/sisf-render/tests/readback.rs` 用 GPU 读回断言（无需窗口），

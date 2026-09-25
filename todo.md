@@ -304,12 +304,24 @@
   - **左右反了 = 自绘素材把头发画在朝向侧并盖掉眼睛**（第 16 条）。同一探针读头顶那 5 行的墨点列：
     朝左 ⇒ 墨点在格内 x=9/10、头发 72 px 在右半；朝右 ⇒ 墨点在 x=21、头发 50 px 在左半。截图可见
     蓝衣角色后脑在左、脸在右（当时正按住 ArrowRight）。
+  - **修完第 15 条后用户复测报回"整个地图在抖"（第 18 条）**：把 `lattice_alpha` 加上之后同一探针换
+    成"相邻两帧最佳整数位移"判据，在 `?ex=tiled_map&wgl`（544×416 ⇒ 1 虚拟像素 = 1 物理像素）实测：
+    按住 ArrowLeft 60 个有效帧 ⇒ 59 对相邻帧平均 0.13% / 最大 0.18% 对不齐，最佳位移恒为 `dx = 2`
+    （偶尔 1/3，从不为负），每帧 distinct 颜色数恒为 41；把 `lattice_alpha` 临时改成恒等函数重编
+    重测（同一探针、同一按法）⇒ 平均 17.16% / 最大 19.89% 对不齐，distinct 颜色数 64~145（多出来
+    的就是重采样混出的中间色）。纵向按住 ArrowUp 55 帧：平均 0.21% / 最大 0.34%，`dy` 恒为 2~3。
+    恢复取整、重编后再测一遍确认回到 0.13%。桌面同版本（release）冒烟见下条。
   - 桌面同版本冒烟：`tiled_map.exe` 起 `adapter: NVIDIA GeForce RTX 2080 Ti (DiscreteGpu, Vulkan)`、
     `物理 800x600 ⇒ 画面 (128,92) 544x416，倍率 1.00，光栅档 1`、`batches 4 quads 732 sprites 637 pages 1 tier 1x`，
     无 panic。闸门重跑（原命令）：`cargo xtask fmt --check` 净、`cargo xtask clippy` 两端 0 warning、
-    `cargo xtask check-all` 四组 0 warning、`cargo test --workspace --all-features` **237 绿 0 红**
-    （本阶段 +2：`the_following_camera_shares_the_hero_s_interpolation_phase`、
-    `the_side_walk_frames_actually_look_left_and_right`）、`cargo xtask golden` 两条全绿。
+    `cargo xtask check-all` 四组 0 warning、`cargo test --workspace --all-features` **238 绿 0 红**
+    （本阶段 +3：`the_following_camera_shares_the_hero_s_interpolation_phase`、
+    `the_side_walk_frames_actually_look_left_and_right`、
+    `the_following_camera_snaps_the_world_to_the_pixel_lattice`）、`cargo xtask golden` 两条全绿。
+    第 18 条的修复落在 `322e520` 之后的那条提交里，闸门用同一套原命令重跑：`cargo xtask fmt --check`
+    净、`cargo xtask clippy` 两端 0 warning、`cargo xtask check-all` 四组 0 warning、
+    `cargo test --workspace --all-features` **238 绿 0 红**、`cargo xtask golden` 两条全绿，桌面
+    release 冒烟（Vulkan，`batches 4 quads 732 sprites 637`）无 panic。
 - 验收（整段）：anim/route/timing 单测 + tiled_map → 提交 `P7 anim+route+tick`。→ 落地说明见 `docs/sprite.md`「T8：固定拍上的动画与任务」（两条互斥动画通路的分工表、任务三约定、`dir()/step()` 是动画状态）+ `docs/platforms.md`（letterbox 只管投影不管裁剪、HUD 必须挂更高 viewport 层）+ `docs/text.md`（文字层号：`draw_text_at`）。闸门（都用原命令）：`cargo xtask fmt --check` 净、`cargo xtask clippy`（win `--all-targets -D warnings` + wasm32 web）0 warning、`cargo xtask check-all` 四组 0 warning、`cargo test --workspace --all-features` 全绿 0 红、`cargo xtask golden` 全绿（文字基线不受新参数影响）。
 
 ### T8 期间发现并修正的事实（供后续阶段引用）
@@ -400,6 +412,24 @@
     "只在动的过程中成立"的断言不必靠肉眼读截图。配合合成 `KeyboardEvent` 按住 N 毫秒（第 14
     条）就是完整的无人值守走位取证。注意：静止角色的位置要等 `keyup` 之后再采（走路时脚底格
     子还在换），而颜色匹配别用近似 —— 水色 (42,92,158) 与上衣蓝 (72,96,168) 只差 30/4/10。
+18. **同相位只解决"谁相对谁晃"，还得保证那个点在像素格点上**（第二次报回的抖动："现在变成整个
+    地图都在抖，左右移动时左右抖、上下移动时上下抖"）。第 15 条把相机改成跟随 `interpolated(alpha)`
+    之后，晃的对象从角色换成了整张地图：图集采样器是 `FilterMode::Linear`
+    （`crates/sisf-render/src/renderer.rs:286`），相机平移量一带小数 ⇒ 本来对齐物理像素的地图格点
+    整体落到纹素中间被重采样，每根硬边缘摊成两个像素、摊法还随 `alpha` 每帧变。`Nearest` 也躲不掉
+    （边缘不糊，但整图随小数部分在两个像素位置之间跳）。修法在示例侧：`lattice_alpha` 把插值折到
+    1px 台阶（`(alpha × 每拍位移).round() / 每拍位移`，`SPEED = 2` ⇒ 一拍两步），角色与地图同时
+    落在格点上、相对位置仍精确。真亚像素滚动要么换 `Nearest` 接受 1px 跳，要么时间抖动 ⇒ 与 T10 的
+    `filter` 选择权一起定。钉成单测 `the_following_camera_snaps_the_world_to_the_pixel_lattice`
+    （含对照组：不取整时 `alpha = 0.3` 就把相机推到格点外）。判据不是"看着晃不晃"，而是**相邻两帧
+    能否用一个整数位移对齐** —— 量法与读数见 T8e 的证据块与 `docs/platforms.md`。
+19. **canvas 像素探针会读到"已清空的缓冲"，且必须确认相机真的在滚**（第 17 条那两个前提没写就白测
+    一轮）。WebGL canvas 未开 `preserveDrawingBuffer`，在应用自己的 rAF 之外 `drawImage` 有时拿到的是
+    本帧、有时是清空后的 ⇒ 症状是"相邻两帧 18.9% 的像素变了、却任何整数位移都对不齐"，看着像亚像素
+    重采样、其实是读回伪影。滤法：按 distinct 颜色数（清空帧 <8，真实帧 ≥40）丢掉再算。另一半：
+    tiled_map 的相机在 `cam.x` 夹到 224（`WORLD_W 768 - 544`）之后就不再滚，角色改成在屏内走 ——
+    于是"按住 ArrowRight 25 帧、像素只变 0.1%"，量的根本不是滚动。**滚动方向上的探针要从出生格
+    （12,12 ⇒ cam 128）往能滚的那侧按**（ArrowLeft/ArrowUp/ArrowDown）。
 
 ## T9 引擎事件总线 + 输入映射
 - [ ] `sisf-event/src/bus.rs`：`EngineEvent{Action,Key{code,kind,ch},Pointer{kind,pos,button,delta},Lifecycle,Custom(u32,serde_json::Value)}` + `EngineBus{push,drain}`。验收：drain 顺序单测。

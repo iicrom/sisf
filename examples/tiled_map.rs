@@ -14,10 +14,14 @@
 //! 相机走现成的 viewport 栈：`App::prepare` 里 pop 掉上一帧的相机层、push 一个平移
 //! `(-cam.x, -cam.y)` 的子 viewport，世界精灵的 `Sprite::layer` 就是那一层号，
 //! `collect_at` 的产物因此自带相机投影；HUD 文字仍走同一层号但把平移抵消回去（屏幕固定）。
-//! 相机取的是 `Sprite::interpolated(alpha)` —— 与角色**真正被画出来的那个点**同相位。
-//! 这一步不能挪到 `tick` 末：投影在 `tick` 之后、`draw` 之前烘进 `FrameU`，而 `alpha` 只有
-//! 这一刻才知道。钉在拍尾的相机配插值角色，等于每拍把角色相对地图拽回 `(1 - alpha) × 2px`，
-//! 看着就是角色一直在抖。
+//! 相机取的是 `Sprite::interpolated(lattice_alpha(alpha))` —— 角色**真正被画出来的那个点**，
+//! 而且只取落在像素点阵上的那几个点。这两条各治一次用户报回的抖动：
+//! - 不能挪到 `tick` 末推：投影在 `tick` 之后、`draw` 之前烘进 `FrameU`，`alpha` 只有 `prepare`
+//!   这一刻才知道。钉在拍尾的相机配插值角色，等于每拍把角色相对地图拽回 `(1 - alpha) × 2px`，
+//!   那就是"人物一直在抖"。
+//! - 也不能拿真亚像素的 `alpha` 去推：相机平移量一带小数，整张地图的整数格点就落到纹素中间
+//!   被重采样，硬边缘随 `alpha` 呼吸，于是抖动从"角色相对地图晃"变成"满屏跟着晃"。
+//!   把 `alpha` 折到点阵上（一拍 `SPEED = 2` px ⇒ 两个 1px 台阶）后角色与地图同在格点上。
 //!
 //! 图块尺寸就是清单钉的 32/48：格子 32×32，角色 32×48（占一格、向上伸出半格）。锚点恒取
 //! 左下角 `(0,1)`，于是 `pos` 落在格点阵上，`cell_of` 只要一次除法，路线的逐格位移也不会
@@ -33,8 +37,8 @@
 //!
 //! 手测清单（桌面与 wasm 同一份）：
 //! 1. 方向键/WASD 四向逐格走，脚下步帧 1↔2 交替，停手即回站立帧且静止不再换帧。
-//!    走位期间**角色相对脚下格子不来回跳**（相机跟着 `interpolated(alpha)` 走，见 `prepare`），
-//!    且面朝左时脸与眼睛在左半边、头发盖住右半边（朝右镜像）。
+//!    走位期间**角色相对脚下格子不来回跳、整张地图也不跟着晃**（相机跟着点阵化后的插值点走，
+//!    见 `prepare` 与 `lattice_alpha`）；且面朝左时脸与眼睛在左半边、头发盖住右半边（朝右镜像）。
 //! 2. 走到水面/石墙/树/屋墙前停住，不陷入格子；桥与门可以过去。
 //! 3. 站在树或屋子的**南邻**时头被树冠/屋顶压住（上方层），站在其**北邻**时整个人压在它
 //!    上面（y 排序）—— 两种叠法同时成立才算三层。
@@ -1021,6 +1025,17 @@ impl TiledMap {
         );
     }
 
+    /// 把 `alpha` 折到**像素点阵**上：角色每拍走 `SPEED` 个整数虚拟像素，因此
+    /// `prev + alpha × SPEED` 只有在 `alpha × SPEED` 是整数时才落在纹素格点上。取整它 ⇒
+    /// 相机（= 该点减一个整数常量）与角色画的点同时落在格点上，地图不再被搬到纹素中间
+    /// 重采样。代价是位移按 1px 台阶走（`SPEED = 2` ⇒ 一拍两步），而这正是像素美术该有的
+    /// 走法：真亚像素滚动的代价是整张地图糊掉再来回晃（第二次报回的抖动）。
+    ///
+    /// 前提：`SPEED` 与图块格点都是整数，且角色的位移只来自 walk 节点（每拍 `SPEED` px）。
+    fn lattice_alpha(alpha: f32) -> f32 {
+        (alpha * SPEED).round() / SPEED
+    }
+
     /// 相机：把角色视觉中心带到视口中心，再夹在地图里（贴边时空出的是地图外，不该滚）。
     fn camera_for(hero: Vec2) -> Vec2 {
         let (vw, vh) = (VIRTUAL.0 as f32, VIRTUAL.1 as f32);
@@ -1227,18 +1242,21 @@ impl App for TiledMap {
 
     /// 把相机打到投影栈上 —— 必须在 `prepare` 而不是 `tick`：这一刻才拿得到本帧的 `alpha`，
     /// 而下一行就要把栈烘进 `FrameU`。相机取角色**真正被画出来的那个点**
-    /// （`interpolated(alpha)`），两边同相位，角色才不会相对地图每拍回拽
-    /// `(1 - alpha) × SPEED` 像素（那就是抖动）。
+    /// （`interpolated(lattice_alpha(alpha))`），两边同相位，角色才不会相对地图每拍回拽
+    /// `(1 - alpha) × SPEED` 像素（第一次报回的抖动）；而这个点还须落在像素格点上，否则整张
+    /// 地图跟着亚像素晃（第二次报回的抖动）。
     fn prepare(&mut self, alpha: f32, ctx: &mut FrameCtx) {
         let hero = self
             .arena
             .get(self.hero)
-            .map_or(self.hero_at, |h| h.interpolated(alpha));
+            .map_or(self.hero_at, |h| h.interpolated(Self::lattice_alpha(alpha)));
         self.cam = Self::camera_for(hero);
         self.push_camera(ctx);
     }
 
     fn draw(&mut self, alpha: f32, renderer: &mut Renderer) {
+        // 与 `prepare` 推相机用的是同一个点阵系数：投影与 sprite 只能同相位、同格点。
+        let alpha = Self::lattice_alpha(alpha);
         self.frame += 1;
         self.load_font();
         // 槽容量配到精灵数：整帧一片，批数才是纯合批结果（只设一次，避免重建缓冲）。
@@ -1466,8 +1484,9 @@ mod tests {
         }
     }
 
-    /// 抖动回归：相机得跟着角色**真正被画出来的那个点**（`interpolated(alpha)`）走，
-    /// 而不是拍尾位置 —— 两边同相位，角色在画面上的位置才不会随 `alpha` 来回跳。
+    /// 第一次报回的抖动（"人物一直在抖"）回归：相机得跟着角色**真正被画出来的那个点**
+    /// （`interpolated(lattice_alpha(alpha))`）走，而不是拍尾位置 —— 两边同相位，角色在画面上
+    /// 的位置才不会随 `alpha` 来回跳。
     ///
     /// `App::prepare` 的存在理由：投影在 `tick` 之后、`draw` 之前烘进 `FrameU`，所以相机推到
     /// `tick` 末就是钉死在拍尾，角色每拍被拽回 `(1 - alpha) × 每拍位移` 像素再弹回去。
@@ -1485,7 +1504,11 @@ mod tests {
         let mut first: Option<(f32, f32)> = None;
         for alpha in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
             app.prepare(alpha, &mut ctx);
-            let drawn = app.arena.get(hero).unwrap().interpolated(alpha);
+            let drawn = app
+                .arena
+                .get(hero)
+                .unwrap()
+                .interpolated(TiledMap::lattice_alpha(alpha));
             let f = ctx.frame_u(0.0);
             let p = xform(&f.proj[WORLD.0 as usize], [drawn.x, drawn.y, 0.0, 1.0]);
             let ndc = (p[0] / p[3], p[1] / p[3]);
@@ -1520,6 +1543,61 @@ mod tests {
                 (1.0 - alpha) * SPEED
             );
         }
+    }
+
+    /// 第二次报回的抖动（"整个地图都在抖，左右移动时左右抖"）回归：把相机改成跟随
+    /// `interpolated(alpha)` 之后，角色确实不跳了，可相机自身的平移量变成了亚像素 ——
+    /// 地图那些整数格点被搬到纹素中间重采样，整屏的硬边缘随 `alpha` 呼吸，于是抖动从
+    /// "角色 relative 地图"变成"地图 relative 屏幕"。修法是让插值只落在**像素点阵**上
+    /// （`lattice_alpha`）：一拍 `SPEED = 2` px ⇒ 两个 1px 台阶，角色与地图同时在格点上。
+    #[test]
+    fn the_following_camera_snaps_the_world_to_the_pixel_lattice() {
+        let mut app = TiledMap::new();
+        let mut ctx = FrameCtx::new(&config(), (1088, 832), 1.0);
+        let from = lattice(12, 12);
+        let to = Vec2::new(from.x + SPEED, from.y);
+        let hero = app.hero;
+        app.arena.get_mut(hero).unwrap().teleport(from);
+        app.arena.get_mut(hero).unwrap().set_pos(to);
+
+        let on_grid = |v: Vec2| v.x == v.x.round() && v.y == v.y.round();
+        let mut steps = Vec::new();
+        for alpha in [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0] {
+            app.prepare(alpha, &mut ctx);
+            // 相机层把世界点整体平移 `-cam`：cam 不在格点上，地图纹素就一律落在两个物理
+            // 像素正中（每一行边缘同时糊一次），这一帧之后再恢复 —— 满屏晃的出处。
+            assert!(
+                on_grid(app.cam),
+                "alpha {alpha} 下相机离开了格点: {:?}",
+                app.cam
+            );
+            let d = app
+                .arena
+                .get(hero)
+                .unwrap()
+                .interpolated(TiledMap::lattice_alpha(alpha));
+            assert!(on_grid(d), "alpha {alpha} 下角色画在格点外: {d:?}");
+            steps.push(d.x - from.x);
+        }
+        // 台阶不得倒退（那就是锯齿），也不得是 0→2 一跳（那等于把插值整个丢掉）。
+        assert!(
+            steps.windows(2).all(|w| w[1] >= w[0]),
+            "点阵台阶倒退了: {steps:?}"
+        );
+        let mut uniq: Vec<f32> = steps.clone();
+        uniq.dedup();
+        assert_eq!(
+            uniq,
+            vec![0.0, 1.0, 2.0],
+            "一拍该走两个 1px 台阶: {steps:?}"
+        );
+
+        // 对照组：不取整时 alpha 0.3 就把相机推到格点外（`0.3 × 2 = 0.6` px）。
+        let raw = app.arena.get(hero).unwrap().interpolated(0.3);
+        assert!(
+            !on_grid(TiledMap::camera_for(raw)),
+            "对照组失效：未取整的相机本来该落在格点外，实际 {raw:?}"
+        );
     }
 
     /// 三层 + y 排序：同一 epoch 之下 z 才有决定权，这里合成一批并读出画序。
