@@ -9,7 +9,8 @@
 //! - `KeyboardInput` → `EngineEvent::Key`（物理键名 + Press/Repeat/Release），三端同一条
 //!   归一化路径，收到即派发给 `App::on_event`。
 //! - 帧节拍：`RedrawRequested` → `TickClock::step(真实 dt)` → 0..=5 次 `App::tick(周期)`
-//!   → `App::draw(alpha)`。渲染帧率与 `tick_hz` 解耦（`timing` 模块）。
+//!   → `App::prepare(alpha)`（投影烘焙前的几何对齐）→ `App::draw(alpha)`。渲染帧率与
+//!   `tick_hz` 解耦（`timing` 模块）。
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -181,6 +182,8 @@ impl<A: App + 'static> Runner<A> {
             s.app.tick(period, &mut s.frame);
         }
         let alpha = s.clock.alpha();
+        // 投影在下一行烘焙进 `FrameU`，`draw` 里再改栈已经晚了 ⇒ 相机一类的几何必须先看这一相。
+        s.app.prepare(alpha, &mut s.frame);
         let frame_u = s.frame.frame_u(s.time);
         let clear = s.config.clear;
         renderer.begin_frame(&frame_u, clear);

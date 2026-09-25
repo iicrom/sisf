@@ -296,6 +296,20 @@
     `15,6→15,5` 且相机在北边夹住（`cam 224,0`）⇒ 键盘→`MoveRoute`→相机整条链在 wasm 上通。
     ⚠️ 首帧那行 `第 1 帧合成: batches 0 quads 0` 是真的：`stats()` 读上一次 `end_frame` 的账，
     而 wasm 的第一帧跑在尺寸到货之前（0×0 的空 scissor），桌面则第一帧就有尺寸。
+- 提交后用户手测报回两条缺陷（"小问题：人物左右贴图反了；大问题：人物一直在抖动"），两条都已修 + 钉住：
+  - **抖动 = 相机与角色不同相位**（第 15 条）。修完在 `?ex=tiled_map&wgl`（544×416、倍率 1.00，1 虚拟
+    像素 = 1 物理像素）用逐帧像素探针复验：按住 ArrowRight、每个 rAF 把 canvas `drawImage` 到离屏再
+    `getImageData`，取玩家上衣蓝的最左列 x。旧相位 37 帧读数是 `260,260,261,261,259,260,…`（跨度 2px
+    的锯齿，正是用户看到的抖），新相位同一探针 38 帧恒为 `261`（跨度 0）而地图照旧在滚。
+  - **左右反了 = 自绘素材把头发画在朝向侧并盖掉眼睛**（第 16 条）。同一探针读头顶那 5 行的墨点列：
+    朝左 ⇒ 墨点在格内 x=9/10、头发 72 px 在右半；朝右 ⇒ 墨点在 x=21、头发 50 px 在左半。截图可见
+    蓝衣角色后脑在左、脸在右（当时正按住 ArrowRight）。
+  - 桌面同版本冒烟：`tiled_map.exe` 起 `adapter: NVIDIA GeForce RTX 2080 Ti (DiscreteGpu, Vulkan)`、
+    `物理 800x600 ⇒ 画面 (128,92) 544x416，倍率 1.00，光栅档 1`、`batches 4 quads 732 sprites 637 pages 1 tier 1x`，
+    无 panic。闸门重跑（原命令）：`cargo xtask fmt --check` 净、`cargo xtask clippy` 两端 0 warning、
+    `cargo xtask check-all` 四组 0 warning、`cargo test --workspace --all-features` **237 绿 0 红**
+    （本阶段 +2：`the_following_camera_shares_the_hero_s_interpolation_phase`、
+    `the_side_walk_frames_actually_look_left_and_right`）、`cargo xtask golden` 两条全绿。
 - 验收（整段）：anim/route/timing 单测 + tiled_map → 提交 `P7 anim+route+tick`。→ 落地说明见 `docs/sprite.md`「T8：固定拍上的动画与任务」（两条互斥动画通路的分工表、任务三约定、`dir()/step()` 是动画状态）+ `docs/platforms.md`（letterbox 只管投影不管裁剪、HUD 必须挂更高 viewport 层）+ `docs/text.md`（文字层号：`draw_text_at`）。闸门（都用原命令）：`cargo xtask fmt --check` 净、`cargo xtask clippy`（win `--all-targets -D warnings` + wasm32 web）0 warning、`cargo xtask check-all` 四组 0 warning、`cargo test --workspace --all-features` 全绿 0 红、`cargo xtask golden` 全绿（文字基线不受新参数影响）。
 
 ### T8 期间发现并修正的事实（供后续阶段引用）
@@ -331,8 +345,9 @@
    夹到端点档。
 8. **viewport 层的投影在 resize 后自动重推，但 `push` 必须发生在 `frame_u` 之前**。`Runner` 的帧序是
    `tick* → frame.frame_u() → draw`，而 `FrameCtx::recompute` 只按存的 `rect` 重新派生 `1..depth`
-   的投影 ⇒ 相机层在 `tick` 里推一次就够，resize 不需要手动重建；反过来在 `draw` 里推层会晚于本帧的
-   `frame_u`（下一帧才被读到）。
+   的投影 ⇒ 推过一次的层在 resize 后不用手动重建；反过来在 `draw` 里推层会晚于本帧的
+   `frame_u`（下一帧才被读到）。⚠️ 本条原先还写着"相机层在 `tick` 里推一次就够"——那句是错的，
+   正是第 15 条那个抖动的成因：跟着插值 sprite 走的相机必须在 `App::prepare` 里推。
 9. **整数 2× 放大下 `Linear` 采样不等于像素翻倍**：物理像素中心落在纹素内部的 0.25/0.75 处，相邻纹素
    按 25/75 混合（实测同一逻辑像素的两列差 `rgb` 1~4）。像素风要真翻倍得 `Bitmap::filter = Nearest`
    那条双 sampler（`docs/sprite.md` 已记为 T10 决策），本阶段不动 —— 但别把"整数倍缩放"当成"自动
@@ -357,6 +372,34 @@
 14. **wasm 侧的键盘链路可以无人值守取证**：往 canvas 与 window 派发合成的
     `KeyboardEvent('keydown'/'keyup', {code:'ArrowUp'})`、中间 `setTimeout` 挂住不放，winit 照收
     ⇒ "按住 N 毫秒 ⇒ 逐格走 N 格"这类断言能在浏览器里复现，不必真人按键。
+15. **相机推到 `tick` 末 = 每拍把角色相对地图拽回去一次（"人物一直在抖动"的真因）**：帧顺序是
+    `tick ×N → frame_u → draw(alpha)`，`frame_u` 一旦把 viewport 栈烘进 `FrameU`，`draw` 里再
+    `push_viewport` 就只对下一帧生效。第一版 tiled_map 因此把相机钉在拍尾（`hero_at = h.pos`），
+    角色却画在 `interpolated(alpha)` 上 ⇒ 走起来错位 `(1 - alpha) × SPEED`（SPEED=2 时最多 2 个
+    虚拟像素，且 alpha 每帧都变 ⇒ 一步之内来回跳；站着不动时 `prev_pos == pos`，反倒看不出来）。
+    文件头当时还写过"差别肉眼不可分"——
+    肉眼分得很清。修法：给 `App` 加一相 `prepare(alpha, ctx)`（tick 之后、烘焙之前，`alpha` 与本帧
+    `draw` 同值），相机取 `Sprite::interpolated(alpha)`，于是跟随目标与投影同相位。断言
+    `the_following_camera_shares_the_hero_s_interpolation_phase`：五档 alpha 下角色的屏幕 NDC
+    完全相同，另配对照组量出旧写法在 alpha 0/0.5 时恰好错 2/1 虚拟像素。静态图块
+    `prev_pos == pos`，插值对它们是恒等的 —— 这个坑只有跟着人走的相机暴露得出来。
+    浏览器侧的量化复验（同一份探针跑两次，只换 `prepare` 取哪个相位）：按住 ArrowRight 700ms、
+    逐 rAF 把 canvas `drawImage` 到离屏 2d 再 `getImageData`，取玩家上衣蓝（72,96,168）的最左列
+    x —— 旧相位 37 帧在 `260,261,259,260,…` 之间锯齿（跨度 2px），修好后同一批帧恒为 `261`
+    （跨度 0），而世界仍在滚。
+16. **侧面行走图：头发盖后脑，且必须后画脸**（小问题，但一眼就是"左右反了"）。`draw_body` 的
+    侧向两行原先是"眼睛画在朝向那侧 → 头发矩形再盖住它"，于是朝左的那格露出的脸在右边，四张
+    图读起来左右互换。正确顺序是先用头发盖掉**后脑**那半边（朝左 ⇒ 盖 x∈[15,25)），再画眼睛。
+    `DirPattern::dir_row` 的行序 `下/左/右/上` 本身没错，错的是自绘素材。断言
+    `the_side_walk_frames_actually_look_left_and_right`（在生成的位图上按像素钉"眼睛在朝向那半、
+    头发在后脑那半"，玩家与 NPC 两条带各一遍）；浏览器侧同一条探针读出：朝左那帧墨点在格内
+    x=9/10、头发 72 像素在右半，朝右那帧墨点在 x=21、头发 50 像素在左半。
+17. **"截图之外还能读像素"：canvas 每帧 `drawImage` + `getImageData` 能在浏览器里做定量手测**。
+    wgpu 的 WebGL2 呈现缓冲在同一个 rAF 回调链里还活着（下一次呈现才清），所以在自己注册的
+    rAF 里 `drawImage(canvas)` 到一张离屏 2d canvas，就能拿到本帧像素 ⇒ 抖动/相位/贴图朝向这类
+    "只在动的过程中成立"的断言不必靠肉眼读截图。配合合成 `KeyboardEvent` 按住 N 毫秒（第 14
+    条）就是完整的无人值守走位取证。注意：静止角色的位置要等 `keyup` 之后再采（走路时脚底格
+    子还在换），而颜色匹配别用近似 —— 水色 (42,92,158) 与上衣蓝 (72,96,168) 只差 30/4/10。
 
 ## T9 引擎事件总线 + 输入映射
 - [ ] `sisf-event/src/bus.rs`：`EngineEvent{Action,Key{code,kind,ch},Pointer{kind,pos,button,delta},Lifecycle,Custom(u32,serde_json::Value)}` + `EngineBus{push,drain}`。验收：drain 顺序单测。

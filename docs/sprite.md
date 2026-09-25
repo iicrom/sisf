@@ -90,6 +90,13 @@ layer、再按图集页、再按 blend 分批次，`z` 只在同批次内决定�
 `MoveRoute` 有网格与自由两种模式，网格模式逐格走、`walkable` 钩子拿的是**逐拍坐标**且必须 own
 通行表（示例里因此是 `pass.clone()` 进闭包），撞墙只作废本节点的剩余格数、不作废整条路线。
 
+**插值点只有一个消费者是不够的：相机也得看见它**。`collect_at(view, alpha, ..)` 把精灵画在
+`Sprite::interpolated(alpha)`，而跟随相机是 viewport 栈上的一层、投影在 `draw` 之前就烘完了 ⇒
+相机必须取同一个 `interpolated(alpha)`（`App::prepare`，见 `docs/platforms.md`）。放 `tick` 末
+= 相机钉拍尾 ⇒ 角色每拍相对地图回拽 `(1 - alpha) × 每拍位移`，一步之内来回跳（站着不动时
+`prev_pos == pos`，反倒看不出来）；这是逐拍位移
+（`MoveRoute::walk`）独有的坑，静止的世界图块 `prev_pos == pos`，插值对它们是恒等的。
+
 验收：`anim.rs` 14 条（两条图样的朝向行表与四向帧索引、静止不换帧、短帧表夹住不外跑）、
 `task.rs` 15 条（补间按拍回调、撞墙、wait 队列、`MoveTo` 逐轴、`Jump` 跨缝、`FacingLock`）、
 `timing.rs` 6 条（不足一周期不跑逻辑、`alpha` = 余量、尖峰只补 5 拍并记 `dropped`、

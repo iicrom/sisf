@@ -11,11 +11,13 @@
 //! `(layer, epoch, blend, z, insertion)`，epoch 排在 z 之前，美术一旦分页，RPG 的 y 排序
 //! 就只在页内成立。整帧因此是「1 个普通批 + 1 个 additive 批（灯火）+ 文字批」。
 //!
-//! 相机走现成的 viewport 栈：`tick` 末尾 pop 掉上一拍的相机层、push 一个平移
+//! 相机走现成的 viewport 栈：`App::prepare` 里 pop 掉上一帧的相机层、push 一个平移
 //! `(-cam.x, -cam.y)` 的子 viewport，世界精灵的 `Sprite::layer` 就是那一层号，
-//! `collect_at` 的产物因此自带相机投影；HUD 文字仍走 layer 0（屏幕固定）。相机只在 tick
-//! 更新（`alpha` 要到 `draw` 才知道），一拍最多挪 `SPEED = 2px`，与插值相机的差别肉眼不可
-//! 分，代价是不必给 `App::draw` 塞 `FrameCtx`。
+//! `collect_at` 的产物因此自带相机投影；HUD 文字仍走同一层号但把平移抵消回去（屏幕固定）。
+//! 相机取的是 `Sprite::interpolated(alpha)` —— 与角色**真正被画出来的那个点**同相位。
+//! 这一步不能挪到 `tick` 末：投影在 `tick` 之后、`draw` 之前烘进 `FrameU`，而 `alpha` 只有
+//! 这一刻才知道。钉在拍尾的相机配插值角色，等于每拍把角色相对地图拽回 `(1 - alpha) × 2px`，
+//! 看着就是角色一直在抖。
 //!
 //! 图块尺寸就是清单钉的 32/48：格子 32×32，角色 32×48（占一格、向上伸出半格）。锚点恒取
 //! 左下角 `(0,1)`，于是 `pos` 落在格点阵上，`cell_of` 只要一次除法，路线的逐格位移也不会
@@ -31,6 +33,8 @@
 //!
 //! 手测清单（桌面与 wasm 同一份）：
 //! 1. 方向键/WASD 四向逐格走，脚下步帧 1↔2 交替，停手即回站立帧且静止不再换帧。
+//!    走位期间**角色相对脚下格子不来回跳**（相机跟着 `interpolated(alpha)` 走，见 `prepare`），
+//!    且面朝左时脸与眼睛在左半边、头发盖住右半边（朝右镜像）。
 //! 2. 走到水面/石墙/树/屋墙前停住，不陷入格子；桥与门可以过去。
 //! 3. 站在树或屋子的**南邻**时头被树冠/屋顶压住（上方层），站在其**北邻**时整个人压在它
 //!    上面（y 排序）—— 两种叠法同时成立才算三层。
@@ -618,13 +622,14 @@ fn draw_body(s: &mut Sheet, r: Rect, dir_row: u32, step: u32, tunic: [u8; 4], sk
             s.rect((at.0 + 11, at.1 + 14), (2, 3), ink);
             s.rect((at.0 + 19, at.1 + 14), (2, 3), ink);
         }
+        // 侧面：头发盖住**后脑**那半边，脸和眼睛留在朝向的那侧，且必须后画（先画就被盖掉了）。
         1 => {
+            s.rect((at.0 + 15, at.1 + 6), (10, 16), rgb(58, 40, 28));
             s.rect((at.0 + 9, at.1 + 14), (2, 3), ink);
-            s.rect((at.0 + 7, at.1 + 6), (6, 16), rgb(58, 40, 28));
         }
         2 => {
+            s.rect((at.0 + 7, at.1 + 6), (10, 16), rgb(58, 40, 28));
             s.rect((at.0 + 21, at.1 + 14), (2, 3), ink);
-            s.rect((at.0 + 19, at.1 + 6), (6, 16), rgb(58, 40, 28));
         }
         _ => s.rect((at.0 + 7, at.1 + 6), (18, 12), rgb(58, 40, 28)),
     }
@@ -727,10 +732,11 @@ struct TiledMap {
     items: Vec<Item>,
     keys: Held,
     decide: bool,
-    /// 上一拍的角色位置（HUD 与相机都读它，避免 `draw` 再摸 arena）。
+    /// 拍尾的角色位置（HUD 读数与格子日志读它，避免 `draw` 再摸 arena）。
     hero_at: Vec2,
+    /// 本帧烘进投影的相机，由 `prepare` 按插值后的角色位置算。
     cam: Vec2,
-    /// `tick` 里是否已 push 过相机层（`pop`/`push` 成对 ⇒ 栈深恒在 1..=3）。
+    /// `prepare` 里是否已 push 过相机层（`pop`/`push` 成对 ⇒ 栈深恒在 1..=3）。
     cam_pushed: bool,
     stats: Option<DrawStats>,
     /// 上一次看到的物理尺寸；变了就把 letterbox 读数打进行日志（手测 resize 靠它取证）。
@@ -1208,15 +1214,27 @@ impl App for TiledMap {
         if let Some(h) = self.arena.get(self.hero) {
             self.hero_at = h.pos;
         }
-        self.cam = Self::camera_for(self.hero_at);
         let cell = cell_of(self.hero_at);
         if cell != self.at_cell {
             self.at_cell = cell;
+            let target = Self::camera_for(self.hero_at);
             platform::log_info(&format!(
                 "[tiled_map] 角色到格 {},{}（相机 {:.0},{:.0}）",
-                cell.0, cell.1, self.cam.x, self.cam.y
+                cell.0, cell.1, target.x, target.y
             ));
         }
+    }
+
+    /// 把相机打到投影栈上 —— 必须在 `prepare` 而不是 `tick`：这一刻才拿得到本帧的 `alpha`，
+    /// 而下一行就要把栈烘进 `FrameU`。相机取角色**真正被画出来的那个点**
+    /// （`interpolated(alpha)`），两边同相位，角色才不会相对地图每拍回拽
+    /// `(1 - alpha) × SPEED` 像素（那就是抖动）。
+    fn prepare(&mut self, alpha: f32, ctx: &mut FrameCtx) {
+        let hero = self
+            .arena
+            .get(self.hero)
+            .map_or(self.hero_at, |h| h.interpolated(alpha));
+        self.cam = Self::camera_for(hero);
         self.push_camera(ctx);
     }
 
@@ -1448,6 +1466,62 @@ mod tests {
         }
     }
 
+    /// 抖动回归：相机得跟着角色**真正被画出来的那个点**（`interpolated(alpha)`）走，
+    /// 而不是拍尾位置 —— 两边同相位，角色在画面上的位置才不会随 `alpha` 来回跳。
+    ///
+    /// `App::prepare` 的存在理由：投影在 `tick` 之后、`draw` 之前烘进 `FrameU`，所以相机推到
+    /// `tick` 末就是钉死在拍尾，角色每拍被拽回 `(1 - alpha) × 每拍位移` 像素再弹回去。
+    #[test]
+    fn the_following_camera_shares_the_hero_s_interpolation_phase() {
+        let mut app = TiledMap::new();
+        let mut ctx = FrameCtx::new(&config(), (1088, 832), 1.0);
+        // 一步 = 一拍的真实位移（`MoveRoute::walk` 每拍挪 `SPEED` px），且相机两端不碰 clamp。
+        let from = lattice(12, 12);
+        let to = Vec2::new(from.x + SPEED, from.y);
+        let hero = app.hero;
+        app.arena.get_mut(hero).unwrap().teleport(from);
+        app.arena.get_mut(hero).unwrap().set_pos(to);
+
+        let mut first: Option<(f32, f32)> = None;
+        for alpha in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
+            app.prepare(alpha, &mut ctx);
+            let drawn = app.arena.get(hero).unwrap().interpolated(alpha);
+            let f = ctx.frame_u(0.0);
+            let p = xform(&f.proj[WORLD.0 as usize], [drawn.x, drawn.y, 0.0, 1.0]);
+            let ndc = (p[0] / p[3], p[1] / p[3]);
+            match first {
+                None => first = Some(ndc),
+                Some(want) => assert!(
+                    (ndc.0 - want.0).abs() < 1e-6 && (ndc.1 - want.1).abs() < 1e-6,
+                    "alpha {alpha} 下角色在屏上挪了：{ndc:?} vs {want:?}"
+                ),
+            }
+        }
+
+        // 对照组：把相机钉在拍尾（旧写法）时角色在屏上挪多少 —— 每拍最多 `SPEED` 虚拟像素，
+        // 正是用户看到的抖动。留着它才说明上面那条"同相位"断言不是空转出来的。
+        // （1088×832 配 544×416 是干净的 2×、无边条，于是 NDC × (虚拟宽 / 2) 就是虚拟像素。）
+        let mut pinned = TiledMap::new();
+        pinned.cam = TiledMap::camera_for(to);
+        let mut pctx = FrameCtx::new(&config(), (1088, 832), 1.0);
+        pinned.push_camera(&mut pctx);
+        let pf = pctx.frame_u(0.0);
+        let on_screen = |alpha: f32| {
+            let d = from.lerp(to, alpha);
+            let p = xform(&pf.proj[WORLD.0 as usize], [d.x, d.y, 0.0, 1.0]);
+            p[0] / p[3] * (VIRTUAL.0 as f32 / 2.0)
+        };
+        let rest = on_screen(1.0);
+        for alpha in [0.0f32, 0.5] {
+            let drift = (rest - on_screen(alpha)).abs();
+            assert!(
+                (drift - (1.0 - alpha) * SPEED).abs() < 1e-3,
+                "拍尾相机的错位该是 {} 虚拟像素，实际 {drift}",
+                (1.0 - alpha) * SPEED
+            );
+        }
+    }
+
     /// 三层 + y 排序：同一 epoch 之下 z 才有决定权，这里合成一批并读出画序。
     #[test]
     fn the_three_layers_order_as_ground_decal_y_sort_above() {
@@ -1659,6 +1733,47 @@ mod tests {
         );
         assert_ne!(frame(0, 0), frame(1, 0), "站立帧与迈步帧必须不同");
         assert_ne!(frame(0, 0), frame(0, 3), "朝下与朝上的脸必须不同");
+    }
+
+    /// 侧面行走图必须在**像素**上分得清左右：脸和眼睛在朝向那半边，头发盖住后脑那半边。
+    ///
+    /// 第一版把头发矩形画在朝向侧、正好盖掉刚画好的眼睛（先画眼睛后画头发），于是"朝左"那格
+    /// 露出的脸在右边 —— 用户读到的就是"左右贴图反了"。行序 `下/左/右/上` 本身没错，
+    /// 错的是自绘素材，所以这条断言只能钉在像素上。
+    #[test]
+    fn the_side_walk_frames_actually_look_left_and_right() {
+        let px = build_sheet();
+        let at = |x: u32, y: u32| {
+            let i = ((y * SHEET.0 + x) * 4) as usize;
+            [px[i], px[i + 1], px[i + 2], px[i + 3]]
+        };
+        let ink = [0u8, 0, 0, 255];
+        let hair = [58u8, 40, 28, 255];
+        for (band, who) in [(HERO_AT, "玩家"), (NPC_AT, "NPC")] {
+            for (row, left) in [(1u32, true), (2, false)] {
+                let r = char_rect(band, row, 0);
+                let (x, y) = (r.x as u32, r.y as u32);
+                // 眼睛 y ∈ [14,17)：朝向那侧一颗，背面那半边一颗都不许有。
+                let (front, back) = if left { (9, 21) } else { (21, 9) };
+                assert_eq!(
+                    at(x + front, y + 15),
+                    ink,
+                    "{who} 行 {row} 的眼睛不在朝向那侧"
+                );
+                assert_ne!(at(x + back, y + 15), ink, "{who} 行 {row} 两张侧脸分不出来");
+                // 后脑那半边得是头发（画在眼睛之前 ⇒ 反了顺序就把眼睛盖掉，见上）。
+                let behind_eye = if left {
+                    (x + 20, y + 15)
+                } else {
+                    (x + 11, y + 15)
+                };
+                assert_eq!(
+                    at(behind_eye.0, behind_eye.1),
+                    hair,
+                    "{who} 行 {row} 的头发没盖住后脑"
+                );
+            }
+        }
     }
 
     #[test]

@@ -48,6 +48,18 @@ cargo run -p sisf --example hello_window
 `the_hud_layer_nets_out_the_camera_and_outranks_the_world` 把"相机层自己裁、HUD 层净投影回画面"
 钉成单测，桌面手测的像素证据见 `todo.md` 的 T8e。
 
+**投影在 `draw` 之前烘焙 ⇒ 相机要有自己的相位**（T8 复盘）：`runner` 的帧顺序是
+`tick ×N → App::prepare(alpha) → FrameCtx::frame_u → begin_frame → draw(alpha)`。
+`frame_u` 把 viewport 栈快照进 `FrameU` 后交给 GPU，所以在 `draw` 里 `push_viewport`
+只对**下一帧**生效。于是"跟着插值后的 sprite 走"的相机两头都不对：推到 `tick` 末 = 相机钉在
+拍尾、角色却画在 `Sprite::interpolated(alpha)` 上，角色相对地图每拍被拽回
+`(1 - alpha) × 每拍位移` 像素再弹回来 —— `examples/tiled_map.rs` 那条"人物一直在抖动"就是这么
+来的（`SPEED = 2` 时最多差 2 个虚拟像素；只在走位期间出现，但 alpha 每帧都变 ⇒ 一步之内来回
+跳，站着不动时 `prev_pos == pos` 反而看不出来）；推到 `draw` 里 = 永远慢一帧。
+`App::prepare(alpha, ctx)` 就是为这一刻加的：`alpha` 与本帧 `draw` 同值，而栈还没烘。
+钉成单测 `the_following_camera_shares_the_hero_s_interpolation_phase`（含对照组：拍尾相机在
+alpha 0/0.5 下的错位恰好是 2/1 虚拟像素）。
+
 > 呈现验证提示：Windows 上若显卡走硬件覆盖合成（MPO / flip-model），`BitBlt`/`PrintWindow`
 > 抓到的客户区可能是白色占位，而屏幕上实际有内容。因此"清屏色是否正确"由
 > `crates/sisf-render/tests/readback.rs` 用 GPU 读回断言（无需窗口），
