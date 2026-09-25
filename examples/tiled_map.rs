@@ -1,4 +1,4 @@
-//! T8e 验收示例：三层 tilemap + 键盘四向行走 + 事件格碰撞。
+//! T8e/T9 验收示例：三层 tilemap + 命名动作四向行走 + 事件格碰撞。
 //!
 //! 三层照搬 RPG Maker 的 tile priority，全部落在同一条 `z` 轴上：
 //!
@@ -36,7 +36,8 @@
 //!   `cargo test -p sisf --example tiled_map`
 //!
 //! 手测清单（桌面与 wasm 同一份）：
-//! 1. 方向键/WASD 四向逐格走，脚下步帧 1↔2 交替，停手即回站立帧且静止不再换帧。
+//! 1. 方向键/WASD/手柄十字键/左摇杆四向逐格走（T9：四者都经 `ActionMap` 折成 `up`…，
+//!    示例代码里没有一个裸键名），脚下步帧 1↔2 交替，停手即回站立帧且静止不再换帧。
 //!    走位期间**角色相对脚下格子不来回跳、整张地图也不跟着晃**（相机跟着点阵化后的插值点走，
 //!    见 `prepare` 与 `lattice_alpha`）；且面朝左时脸与眼睛在左半边、头发盖住右半边（朝右镜像）。
 //! 2. 走到水面/石墙/树/屋墙前停住，不陷入格子；桥与门可以过去。
@@ -45,6 +46,8 @@
 //! 4. 走到宝箱的南邻、面朝它按 Enter：宝箱闪两下换成开箱，那一格随即可走。
 //! 5. NPC 绕草地巡逻，走满一段停一拍再走（`wait: true` 独占自己的队列）。
 //! 6. 把窗口拖成奇数边长（1001×701）：像素格不跳相；HUD 在 2×/4× 下发不虚是 T8d 的账。
+//! 7. 手柄（只有桌面有，见 `docs/input.md` 的平台矩阵）：左摇杆与十字键都能走、南键（Xbox
+//!    的 A）开箱、东键（B）等价 Esc；**走路途中拔掉手柄**当拍就停下，不会朝墙一直磨。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -57,7 +60,7 @@ use sisf::asset::DirProvider;
 use sisf::asset::{Vfs, vfs::path as vpath};
 #[cfg(target_arch = "wasm32")]
 use sisf::asset::{VfsPath, VfsProvider, WebManifest};
-use sisf::event::{EngineEvent, KeyKind, Lifecycle};
+use sisf::event::{ActionEdge, EngineEvent};
 use sisf::render::{
     Atlas, AtlasPages, BatchKey, BatchList, Blend, DrawStats, Instance, NO_CLIP, Renderer,
     UploadRing, WHITE_EPOCH,
@@ -641,7 +644,7 @@ fn draw_body(s: &mut Sheet, r: Rect, dir_row: u32, step: u32, tunic: [u8; 4], sk
 
 // ---------------------------------------------------------------------- 输入
 
-/// 四个方向（WASD 与箭头同绑；`EngineEvent::Key` 给的是布局无关的物理键名）。
+/// 四个方向（`ActionMap` 里的 `up`/`down`/`left`/`right`，方向键、WASD、手柄都折成同名动作）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Dir {
     Up,
@@ -651,12 +654,14 @@ enum Dir {
 }
 
 impl Dir {
-    fn of_code(code: &str) -> Option<Self> {
-        match code {
-            "ArrowUp" | "KeyW" => Some(Self::Up),
-            "ArrowDown" | "KeyS" => Some(Self::Down),
-            "ArrowLeft" | "KeyA" => Some(Self::Left),
-            "ArrowRight" | "KeyD" => Some(Self::Right),
+    /// 动作名 → 方向。键位（哪几个键/哪个手柄码算"上"）全在
+    /// [`ActionMap`](sisf::event::ActionMap) 里，这里只认动作名。
+    fn of_action(name: &str) -> Option<Self> {
+        match name {
+            "up" => Some(Self::Up),
+            "down" => Some(Self::Down),
+            "left" => Some(Self::Left),
+            "right" => Some(Self::Right),
             _ => None,
         }
     }
@@ -1185,30 +1190,33 @@ impl VfsProvider for SharedManifest {
 }
 
 impl App for TiledMap {
+    /// T9：游戏侧只读**命名动作**，不读裸按键 —— 方向键 / WASD / 手柄十字键 / 左摇杆
+    /// 走的是同一段代码，改键位（[`ActionMap`](sisf::event::ActionMap) 可 RON 载入）也不必碰这里。
+    ///
+    /// 失焦与挂起时 `Runner` 已经放掉按住的动作并补发 `Release`，所以这里不必再清一次键。
+    /// `Held` 仍由示例自己留着，是因为它要的是"最后按下的方向优先"这条 RPG 惯例，
+    /// 而动作层的按住是位掩码（无序）。
     fn on_event(&mut self, events: &[EngineEvent], _ctx: &mut FrameCtx) {
         for e in events {
-            match e {
-                EngineEvent::Key { code, kind } => {
-                    let down = matches!(kind, KeyKind::Press | KeyKind::Repeat);
-                    if let Some(dir) = Dir::of_code(code) {
-                        self.keys.set(dir, down);
-                    } else if down && (code == "Enter" || code == "Space" || code == "NumpadEnter")
-                    {
-                        self.decide = true;
-                    } else if code == "Escape" {
+            let EngineEvent::Action { name, edge } = e else {
+                continue;
+            };
+            if let Some(dir) = Dir::of_action(name) {
+                self.keys
+                    .set(dir, matches!(edge, ActionEdge::Press | ActionEdge::Hold));
+                continue;
+            }
+            // 一次性动作只以 `Press` 到达（连发重触也是 `Press`）：按着 Enter 逐行跳过
+            // 对话靠的就是这个，而 `Release` 不许再触发一次"决定"。
+            if matches!(edge, ActionEdge::Press) {
+                match name.as_str() {
+                    "ok" => self.decide = true,
+                    "cancel" => {
                         self.keys.clear();
                         self.msg = "keys cleared".to_owned();
                     }
+                    _ => {}
                 }
-                EngineEvent::Lifecycle(l) => match l {
-                    // 失焦/挂起必须放掉按住的方向键，否则回来之后角色朝一个方向磨墙。
-                    Lifecycle::Suspended
-                    | Lifecycle::Focused(false)
-                    | Lifecycle::CloseRequested => {
-                        self.keys.clear();
-                    }
-                    Lifecycle::Resumed | Lifecycle::Focused(true) => {}
-                },
             }
         }
     }
@@ -2195,10 +2203,61 @@ mod tests {
         assert_eq!(keys.order.len(), 1);
         keys.clear();
         assert_eq!(keys.latest(), None);
-        assert_eq!(Dir::of_code("KeyW"), Some(Dir::Up));
-        assert_eq!(Dir::of_code("ArrowLeft"), Some(Dir::Left));
-        assert_eq!(Dir::of_code("Escape"), None);
+        assert_eq!(Dir::of_action("up"), Some(Dir::Up));
+        assert_eq!(Dir::of_action("left"), Some(Dir::Left));
+        assert_eq!(Dir::of_action("ok"), None, "\"决定\"不是方向");
         assert_eq!(Dir::Up.unit(), dir_vector(DIR_UP));
         assert_eq!(Dir::from_rpg(DIR_RIGHT), Dir::Right);
+    }
+
+    /// T9 的接线：示例读的是**命名动作**，所以"手柄左摇杆"与"方向键"在 `on_event` 这里
+    /// 必须是同一条 `Action` 事件 —— 翻译发生在 `InputState`，示例里没有第二张键表。
+    #[test]
+    fn the_app_reads_named_actions_rather_than_raw_keys() {
+        use sisf::event::{EngineBus, KeyKind};
+
+        let mut app = TiledMap::new();
+        let mut ctx = FrameCtx::new(&config(), (544, 416), 1.0);
+        let mut bus = EngineBus::new();
+        ctx.input.feed(
+            &EngineEvent::key("LeftStickX-", KeyKind::Press, None),
+            &mut bus,
+        );
+        ctx.input
+            .feed(&EngineEvent::key("Enter", KeyKind::Press, None), &mut bus);
+        app.on_event(&bus.drain(), &mut ctx);
+        assert_eq!(app.keys.latest(), Some(Dir::Left), "摇杆码要能推动角色");
+        assert!(app.decide, "Enter 的按下要翻成一次\"决定\"");
+
+        // 松开 Enter 不许再来一次"决定"；松开摇杆要把方向放掉。
+        app.decide = false;
+        ctx.input
+            .feed(&EngineEvent::key("Enter", KeyKind::Release, None), &mut bus);
+        ctx.input.feed(
+            &EngineEvent::key("LeftStickX-", KeyKind::Release, None),
+            &mut bus,
+        );
+        app.on_event(&bus.drain(), &mut ctx);
+        assert!(!app.decide, "Release 不是按下");
+        assert_eq!(app.keys.latest(), None, "松开摇杆就该停下");
+
+        // 键盘的 `ArrowLeft` 与手柄码绑在同一个动作上 ⇒ 松开另一个源不该把它放开；
+        // 反过来两个都松开才真的停（位掩码语义，见 `InputState` 文档）。
+        ctx.input.feed(
+            &EngineEvent::key("ArrowLeft", KeyKind::Press, None),
+            &mut bus,
+        );
+        ctx.input.feed(
+            &EngineEvent::key("LeftStickX-", KeyKind::Press, None),
+            &mut bus,
+        );
+        app.on_event(&bus.drain(), &mut ctx);
+        assert_eq!(app.keys.latest(), Some(Dir::Left));
+        ctx.input.feed(
+            &EngineEvent::key("ArrowLeft", KeyKind::Release, None),
+            &mut bus,
+        );
+        app.on_event(&bus.drain(), &mut ctx);
+        assert_eq!(app.keys.latest(), Some(Dir::Left), "还按着手柄那一头");
     }
 }

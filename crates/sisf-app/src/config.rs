@@ -1,5 +1,6 @@
 //! 应用配置。
 
+use sisf_event::ActionMap;
 use sisf_render::Rgba;
 
 /// 虚拟分辨率到物理窗口的映射方式。
@@ -25,6 +26,11 @@ pub struct AppConfig {
     pub tick_hz: f64,
     /// 每帧清屏色。
     pub clear: Rgba,
+    /// 命名动作表（T9）。游戏侧读输入只认这里的动作名，不认裸按键。
+    ///
+    /// 缺省是 RPG Maker 惯例键位；T11 会把工程 `System.json::keyMapping` 翻译成同一种
+    /// [`ActionMap`] 盖上来，玩家自定义键位则走 `ActionMap::from_ron`。
+    pub actions: ActionMap,
 }
 
 impl Default for AppConfig {
@@ -36,6 +42,7 @@ impl Default for AppConfig {
             letterbox: [0.0, 0.0, 0.0, 1.0],
             tick_hz: 60.0,
             clear: [0.0, 0.35, 0.6, 1.0],
+            actions: ActionMap::rpg_maker(),
         }
     }
 }

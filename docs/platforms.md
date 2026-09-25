@@ -117,6 +117,13 @@ alpha 0/0.5 下的错位恰好是 2/1 虚拟像素）。
 （数据层）。修法不是让每个游戏逻辑各自记得推进，而是 `App::tick` 第一行统一
 `arena.begin_tick()`（见 `docs/sprite.md`）。
 
+**输入也走同一条 `Runner`**（T9）：winit 的 `WindowEvent` 与 gilrs 的手柄事件各自只被翻译一次
+（`crates/sisf-app/src/normalize.rs`），三端拿到的是同一套 `EngineEvent`，游戏侧读的是
+`ActionMap` 里的命名动作。差别只在设备层 —— 手柄只有桌面三端有（wasm 要 JS 侧轮询
+`navigator.getGamepads()`、Android 上 gilrs 0.11 没有后端），所以 `native` 里那条 `gilrs`
+feature 与两层 `cfg` 必须一起判。词汇表、边沿语义（Press/Hold/Release、one-shot、连发）、
+死区与平台矩阵见 `docs/input.md`。
+
 > 呈现验证提示：Windows 上若显卡走硬件覆盖合成（MPO / flip-model），`BitBlt`/`PrintWindow`
 > 抓到的客户区可能是白色占位，而屏幕上实际有内容。因此"清屏色是否正确"由
 > `crates/sisf-render/tests/readback.rs` 用 GPU 读回断言（无需窗口），

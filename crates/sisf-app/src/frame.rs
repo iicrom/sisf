@@ -1,5 +1,6 @@
-//! 每帧上下文：物理/虚拟尺寸映射、viewport 投影栈与生命周期状态。
+//! 每帧上下文：物理/虚拟尺寸映射、viewport 投影栈、输入状态与生命周期状态。
 
+use sisf_event::InputState;
 use sisf_render::{PROJ_STACK_DEPTH, mat4_mul, ortho_viewport};
 
 use crate::config::{AppConfig, ScaleMode};
@@ -45,6 +46,9 @@ pub struct FrameCtx {
     pub scale: f32,
     pub suspended: bool,
     pub focused: bool,
+    /// 命名动作的实时状态（T9）。归一化只发生在 `Runner` 一处，这里存的已经是
+    /// "`ok` 按下了吗"这一层，游戏侧不需要知道设备。
+    pub input: InputState,
     /// viewport 栈：每层的子矩形（父层坐标系）与对应投影。
     stack: [Layer; PROJ_STACK_DEPTH],
     /// 当前栈深（1..=8）。
@@ -82,6 +86,7 @@ impl FrameCtx {
             scale: 1.0,
             suspended: false,
             focused: true,
+            input: InputState::new(config.actions.clone()),
             stack: [Layer::ZERO; PROJ_STACK_DEPTH],
             depth: 1,
         };

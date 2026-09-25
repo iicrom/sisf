@@ -6,26 +6,44 @@
 //!   wasm `visibilitychange`。任一生效即上报 `Suspended` 并冻结 tick；Android 额外释放
 //!   `Surface` 与 GPU 资源，`Resumed` 时重建。
 //! - `Resized`/`ScaleFactorChanged` → 重算 `FrameCtx` 投影与输入坐标映射，并请求重配交换链。
-//! - `KeyboardInput` → `EngineEvent::Key`（物理键名 + Press/Repeat/Release），三端同一条
-//!   归一化路径，收到即派发给 `App::on_event`。
-//! - 帧节拍：`RedrawRequested` → `TickClock::step(真实 dt)` → 0..=5 次 `App::tick(周期)`
-//!   → `App::prepare(alpha)`（投影烘焙前的几何对齐）→ `App::draw(alpha)`。渲染帧率与
-//!   `tick_hz` 解耦（`timing` 模块）。
+//!
+//! ## 一帧里输入的位置（T9）
+//!
+//! 设备事件（键盘 / 指针 / 手柄）在**到达的那一刻**就翻译并喂给
+//! [`InputState`](sisf_event::InputState)，随后立刻派发给 `App::on_event` —— 不等下一次
+//! `RedrawRequested`，否则按住方向键的手感会随渲染帧率抖。翻译只做一次，规则在 `normalize`。
+//!
+//! `RedrawRequested` 之后：
+//! 1. 轮询手柄与 `custom` 通道（宿主 / JS 投进来的消息）；
+//! 2. 派发到目前为止攒下的事件；
+//! 3. `TickClock::step(真实 dt)` 决定这一帧补几拍，**每拍**先 `input.tick(bus)`（held 边沿与
+//!    连发只数拍子不数帧），再派发，再 `App::tick(周期)`；
+//! 4. `App::prepare(alpha)`（投影烘焙前的几何对齐）→ `App::draw(alpha)`。
+//!
+//! 失焦/挂起时 [`forget_held`](sisf_event::InputState::forget_held) 放掉所有按住的动作：
+//! 窗口最小化收不到 keyup，不放掉的话游戏回来就朝着一面墙磨。
 
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use sisf_event::{EngineEvent, KeyKind, Lifecycle};
+use sisf_event::{EngineBus, EngineEvent, Lifecycle};
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, WindowEvent};
+use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
-use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::app::App;
 use crate::config::AppConfig;
+use crate::custom;
 use crate::frame::FrameCtx;
+#[cfg(all(
+    feature = "gilrs",
+    not(target_arch = "wasm32"),
+    not(target_os = "android")
+))]
+use crate::gamepad::Gamepads;
+use crate::normalize;
 use crate::platform;
 use crate::timing::TickClock;
 
@@ -37,7 +55,16 @@ pub(crate) struct RunState<A: App> {
     pub renderer: Option<sisf_render::Renderer>,
     pub window: Option<Window>,
     pub frame: FrameCtx,
-    pub events: Vec<EngineEvent>,
+    /// 本批次待派发的事件（裸事件 + `InputState` 翻出来的动作边沿，顺序 = 发生顺序）。
+    pub bus: EngineBus,
+    /// 最近一次光标/触摸的**物理**位置：winit 的 `MouseInput`/`MouseWheel` 自身不带坐标。
+    pub cursor: Option<(f64, f64)>,
+    #[cfg(all(
+        feature = "gilrs",
+        not(target_arch = "wasm32"),
+        not(target_os = "android")
+    ))]
+    pub pads: Option<Gamepads>,
     /// 上一帧的 `platform::now_secs()`；`None` = 挂起后刚恢复，不吃时间。
     pub last: Option<f64>,
     /// 固定步长时钟：把上面那个真实 `dt` 切成 0..=`MAX_CATCHUP` 个 tick + 一个 `alpha`。
@@ -70,7 +97,15 @@ impl<A: App> Runner<A> {
                 renderer: None,
                 window: None,
                 frame,
-                events: Vec::new(),
+                bus: EngineBus::new(),
+                cursor: None,
+                #[cfg(all(
+                    feature = "gilrs",
+                    not(target_arch = "wasm32"),
+                    not(target_os = "android")
+                ))]
+                // 手柄起不来就当没有手柄（`None`），不该让窗口开不了。
+                pads: Gamepads::new(),
                 last: None,
                 clock,
                 time: 0.0,
@@ -90,6 +125,28 @@ impl<A: App + 'static> Runner<A> {
         s.winit_suspended || s.occluded || platform::page_hidden()
     }
 
+    /// 一条**裸**设备事件的唯一去向：进 `InputState`（原样进总线 + 翻出动作边沿），
+    /// 然后立刻派发。
+    fn feed(s: &mut RunState<A>, event: EngineEvent) {
+        s.frame.input.feed(&event, &mut s.bus);
+        Self::deliver(s);
+    }
+
+    /// 引擎自己产生的事件（生命周期等）：不过 `InputState`，直接排队。
+    fn push(s: &mut RunState<A>, event: EngineEvent) {
+        s.bus.push(event);
+    }
+
+    /// 取空总线交给游戏侧。`post_custom` 的消息在这里并入 —— 派发点唯一，所以并入口也唯一。
+    fn deliver(s: &mut RunState<A>) {
+        custom::drain_global_into(&mut s.bus);
+        let events = s.bus.drain();
+        if events.is_empty() {
+            return;
+        }
+        s.app.on_event(&events, &mut s.frame);
+    }
+
     /// 挂起状态迁移 + 事件派发 + renderer 惰性重建。三处入口共用。
     fn sync_suspend(&mut self) {
         let state = self.state.clone();
@@ -97,8 +154,9 @@ impl<A: App + 'static> Runner<A> {
         // 所以这里负责在"恢复/新建 renderer"时踢起重绘链。
         let mut kick = false;
         {
-            let mut s = state.borrow_mut();
-            let now = Self::suspended_now(&s);
+            let mut borrow = state.borrow_mut();
+            let s: &mut RunState<A> = &mut borrow;
+            let now = Self::suspended_now(s);
             if now != s.reported_suspended {
                 s.reported_suspended = now;
                 let lifecycle = if now {
@@ -106,7 +164,11 @@ impl<A: App + 'static> Runner<A> {
                 } else {
                     Lifecycle::Resumed
                 };
-                s.events.push(EngineEvent::Lifecycle(lifecycle));
+                Self::push(s, EngineEvent::Lifecycle(lifecycle));
+                if now {
+                    // 挂起之后再收不到 keyup，现在不放等于把"按着"这件事带过进程边界。
+                    s.frame.input.forget_held(&mut s.bus);
+                }
                 // 不吃挂起期间的时间（T8）：`last` 归零 + 累加器冻结，回来第一帧 0 拍。
                 s.last = None;
                 s.clock.reset();
@@ -116,8 +178,8 @@ impl<A: App + 'static> Runner<A> {
                 }
                 kick = !now;
             }
+            Self::deliver(s);
         }
-        self.drain_events();
         let need_init = {
             let s = state.borrow();
             !s.reported_suspended
@@ -141,18 +203,6 @@ impl<A: App + 'static> Runner<A> {
         }
     }
 
-    fn drain_events(&mut self) {
-        let state = self.state.clone();
-        let mut borrow = state.borrow_mut();
-        // 单次 deref 后再分字段借用（RefMut 的两次隐式 deref 会被判为重复可变借用）。
-        let s: &mut RunState<A> = &mut borrow;
-        if s.events.is_empty() {
-            return;
-        }
-        let events = std::mem::take(&mut s.events);
-        s.app.on_event(&events, &mut s.frame);
-    }
-
     fn do_frame(&mut self) {
         let state = self.state.clone();
         let mut borrow = state.borrow_mut();
@@ -167,6 +217,16 @@ impl<A: App + 'static> Runner<A> {
         if let Some((w, h)) = s.pending_configure.take() {
             renderer.configure(w, h);
         }
+        // 手柄只在帧边界读：gilrs 的队列由 OS 回调喂，一帧读一次是唯一稳定的消费点。
+        #[cfg(all(
+            feature = "gilrs",
+            not(target_arch = "wasm32"),
+            not(target_os = "android")
+        ))]
+        if let Some(pads) = s.pads.as_mut() {
+            pads.poll(&mut s.frame.input, &mut s.bus);
+        }
+        Self::deliver(s);
         let now = platform::now_secs();
         let dt = s
             .last
@@ -179,6 +239,9 @@ impl<A: App + 'static> Runner<A> {
         let steps = s.clock.step(dt);
         let period = s.clock.period();
         for _ in 0..steps {
+            // held 与连发按拍报 ⇒ 补帧时一帧内多几拍也就多几条 `Hold`，逻辑不随帧率漂。
+            s.frame.input.tick(&mut s.bus);
+            Self::deliver(s);
             s.app.tick(period, &mut s.frame);
         }
         let alpha = s.clock.alpha();
@@ -198,17 +261,6 @@ impl<A: App + 'static> Runner<A> {
     }
 }
 
-/// winit 物理键 → 与键盘布局无关的键名（`"ArrowLeft"`、`"KeyW"`）。
-///
-/// 借 `KeyCode` 的 `Debug` 名当词汇表，而不是自己抄一张 200 项的匹配表：变体名本就是
-/// T9 `ActionMap` 要绑的东西。未识别的扫描码带上原编号，不静默成空串。
-fn key_name(key: &PhysicalKey) -> String {
-    match key {
-        PhysicalKey::Code(code) => format!("{code:?}"),
-        PhysicalKey::Unidentified(native) => format!("Native({native:?})"),
-    }
-}
-
 impl<A: App + 'static> ApplicationHandler for Runner<A> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let state = self.state.clone();
@@ -222,11 +274,10 @@ impl<A: App + 'static> ApplicationHandler for Runner<A> {
                     Ok(window) => {
                         let size = window.inner_size();
                         let sf = window.scale_factor();
-                        let frame = {
-                            let cfg = &s.config;
-                            FrameCtx::new(cfg, (size.width, size.height), sf)
-                        };
-                        s.frame = frame;
+                        // 只在这里整体换 `FrameCtx`（此刻还没有任何按住状态）；Android 挂起
+                        // 回来时窗口还在，不走这条路径，`input` 因此不会被打断。
+                        let cfg = &s.config;
+                        s.frame = FrameCtx::new(cfg, (size.width, size.height), sf);
                         s.window = Some(window);
                     }
                     Err(e) => {
@@ -246,9 +297,9 @@ impl<A: App + 'static> ApplicationHandler for Runner<A> {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        let state = self.state.clone();
         match event {
             WindowEvent::Resized(size) => {
-                let state = self.state.clone();
                 let mut s = state.borrow_mut();
                 if size.width == 0 || size.height == 0 {
                     s.occluded = true; // Win 最小化：停帧，等恢复
@@ -265,7 +316,6 @@ impl<A: App + 'static> ApplicationHandler for Runner<A> {
                 self.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                let state = self.state.clone();
                 let mut s = state.borrow_mut();
                 let size = s.frame.physical_size;
                 let mode = s.config.scale_mode;
@@ -276,32 +326,61 @@ impl<A: App + 'static> ApplicationHandler for Runner<A> {
                 self.request_redraw();
             }
             WindowEvent::Focused(focused) => {
-                let state = self.state.clone();
-                let mut s = state.borrow_mut();
+                let mut borrow = state.borrow_mut();
+                let s: &mut RunState<A> = &mut borrow;
                 s.frame.focused = focused;
-                s.events
-                    .push(EngineEvent::Lifecycle(Lifecycle::Focused(focused)));
+                Self::push(s, EngineEvent::Lifecycle(Lifecycle::Focused(focused)));
+                if !focused {
+                    // 失焦收不到剩下的 keyup：主动放掉，回来才不会朝一面墙磨。
+                    s.frame.input.forget_held(&mut s.bus);
+                }
+                Self::deliver(s);
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                let state = self.state.clone();
-                state.borrow_mut().events.push(EngineEvent::Key {
-                    code: key_name(&event.physical_key),
-                    kind: match event.state {
-                        ElementState::Pressed if event.repeat => KeyKind::Repeat,
-                        ElementState::Pressed => KeyKind::Press,
-                        ElementState::Released => KeyKind::Release,
-                    },
-                });
-                // 输入不等到下一次挂起迁移才派发：立刻喂给 app，本帧的 tick 就能据此改路线。
-                self.drain_events();
+                let mut borrow = state.borrow_mut();
+                let s: &mut RunState<A> = &mut borrow;
+                Self::feed(s, normalize::key_event(&event));
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let mut borrow = state.borrow_mut();
+                let s: &mut RunState<A> = &mut borrow;
+                let at = (position.x, position.y);
+                let event = normalize::cursor_moved(&s.frame, at, s.cursor);
+                s.cursor = Some(at);
+                Self::feed(s, event);
+            }
+            WindowEvent::MouseInput {
+                state: btn_state,
+                button,
+                ..
+            } => {
+                let mut borrow = state.borrow_mut();
+                let s: &mut RunState<A> = &mut borrow;
+                // 从没动过鼠标就点（触摸板/刚进窗口）时按左上角算，而不是丢掉这次点击。
+                let cursor = s.cursor.unwrap_or((0.0, 0.0));
+                let event = normalize::mouse_input(&s.frame, btn_state, &button, cursor);
+                Self::feed(s, event);
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let mut borrow = state.borrow_mut();
+                let s: &mut RunState<A> = &mut borrow;
+                let cursor = s.cursor.unwrap_or((0.0, 0.0));
+                let event = normalize::mouse_wheel(&s.frame, &delta, cursor);
+                Self::feed(s, event);
+            }
+            WindowEvent::Touch(touch) => {
+                let mut borrow = state.borrow_mut();
+                let s: &mut RunState<A> = &mut borrow;
+                let at = (touch.location.x, touch.location.y);
+                let event = normalize::touch(&s.frame, &touch.phase, at);
+                s.cursor = Some(at);
+                Self::feed(s, event);
             }
             WindowEvent::CloseRequested => {
-                let state = self.state.clone();
-                state
-                    .borrow_mut()
-                    .events
-                    .push(EngineEvent::Lifecycle(Lifecycle::CloseRequested));
-                self.drain_events();
+                let mut borrow = state.borrow_mut();
+                let s: &mut RunState<A> = &mut borrow;
+                Self::push(s, EngineEvent::Lifecycle(Lifecycle::CloseRequested));
+                Self::deliver(s);
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {

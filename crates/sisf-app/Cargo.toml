@@ -13,12 +13,18 @@ sisf-event.workspace = true
 sisf-asset.workspace = true
 sisf-media.workspace = true
 sisf-audio.workspace = true
+serde_json.workspace = true
 winit.workspace = true
 wgpu.workspace = true
 raw-window-handle.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = { workspace = true, optional = true }
+
+# 手柄只在桌面三端（Win/Linux/macOS）；Android 上 gilrs 0.11 没有可用后端，
+# 故连依赖都不声明（见 `docs/input.md` 的平台矩阵）。
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))'.dependencies]
+gilrs = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true, optional = true }
@@ -31,8 +37,12 @@ android-activity = { workspace = true, optional = true, features = ["native-acti
 
 [features]
 default = ["native"]
-# winit 原生窗口（桌面 + Android）；T7 起追加 cpal、T9 追加 gilrs
-native = ["dep:pollster", "dep:android-activity"]
+# winit 原生窗口（桌面 + Android）；T7 起追加 cpal、T9 追加 gilrs（仅桌面，见上）
+native = ["dep:pollster", "dep:android-activity", "gilrs"]
+# 手柄支持。**光靠 feature 不够**：feature 是跨 target 的，而 `gilrs` 依赖只声明在桌面那组
+# target 上（wasm 与 Android 上它不存在），所以代码里一律写
+# `all(feature = "gilrs", not(target_arch = "wasm32"), not(target_os = "android"))`。
+gilrs = ["dep:gilrs"]
 # wasm32：wasm-bindgen/web-sys 驱动 + T7 WebAudio pump + T4 fetch loader
 web = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:web-sys", "dep:js-sys"]
 # T12：egui sprite/batch/帧时间面板

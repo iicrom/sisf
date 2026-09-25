@@ -2,13 +2,22 @@
 
 pub mod app;
 pub mod config;
+pub mod custom;
 pub mod frame;
+#[cfg(all(
+    feature = "gilrs",
+    not(target_arch = "wasm32"),
+    not(target_os = "android")
+))]
+pub(crate) mod gamepad;
+pub(crate) mod normalize;
 pub mod platform;
 pub(crate) mod runner;
 pub mod timing;
 
 pub use app::App;
 pub use config::{AppConfig, ScaleMode};
+pub use custom::post_custom;
 pub use frame::{FrameCtx, Viewport};
 pub use runner::Runner;
 pub use timing::{MAX_CATCHUP, TickClock};
