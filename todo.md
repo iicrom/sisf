@@ -332,7 +332,10 @@
     **总位移：166px → 176px**（理想 178px）。钉成单测
     `the_camera_tracks_the_ideal_scroll_under_a_jittery_frame_rate`。
     浏览器侧同一动作的每格耗时（应用自己的带时间戳逐格日志）从 ~283ms（3.53 格/s，慢 9%）回到
-    **263/267/257ms**（理想 266.7ms = 3.75 格/s = 16 拍/格）。
+    **263/267/257ms**（理想 266.7ms = 3.75 格/s = 16 拍/格）。字节新鲜的重建（`cargo xtask web tiled_map`
+    ⇒ `web/pkg/tiled_map_bg.wasm` 15:20:34；注意不带示例名时它缺省只构建 `hello_window`）在同一页面
+    按住 ArrowLeft 2409ms 复测：9 个格间隔 `279,257,279,253,270,275,265,268,255` ⇒ **均值 266.8ms**
+    （±12ms = rAF 的 18ms 量化，不是速度偏差）。
     顺手把格点从虚拟格推广到设备格（第 21 条，2× 下 5 个台阶 vs 3 个；1× 下恒等 ⇒ 不是这次的解药），
     并把 `the_following_camera_snaps_the_world_to_the_pixel_lattice` 挪到 1×、新增
     `the_camera_lattice_is_the_device_pixel_grid_not_the_virtual_one`（2×，含虚拟格对照组）。

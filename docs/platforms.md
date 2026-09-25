@@ -111,6 +111,7 @@ alpha 0/0.5 下的错位恰好是 2/1 虚拟像素）。
 
 ```sh
 cargo xtask web           # 构建 wasm + wasm-bindgen 到 web/pkg，并在 127.0.0.1:8080 起静态服务
+cargo xtask web tiled_map # 换示例：不带示例名时缺省只构建 hello_window
 ```
 
 - 打开 `http://127.0.0.1:8080/index.html`：WebGPU 优先。
