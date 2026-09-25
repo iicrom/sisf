@@ -322,6 +322,27 @@
     净、`cargo xtask clippy` 两端 0 warning、`cargo xtask check-all` 四组 0 warning、
     `cargo test --workspace --all-features` **238 绿 0 红**、`cargo xtask golden` 两条全绿，桌面
     release 冒烟（Vulkan，`batches 4 quads 732 sprites 637`）无 panic。
+  - **第二次复测仍报回"还是抖，人物不抖背景抖"（第 20 条）**：前两条都对，晃的不是映射而是记账 ——
+    `MoveRoute` 每格多烧一拍空转 ⇒ `TickClock` 消耗周期把 `alpha` 归零，`prev_pos`/`pos` 却没动，
+    `interpolated(alpha)` 把最后一步重播一遍；相机把角色钉在屏幕正中，所以只有背景露出错位。
+    判据用**离线复放**（浏览器像素探针在这条路上不可信：页面被遮挡时 `getImageData` 返回冻结缓冲，
+    见第 22 条）：把 `?ex=tiled_map&wgl` 实测的节拍 `[18.2,12.1,18.2,24.3,…]`（均值 17.7ms ⇒
+    56.5fps）逐帧喂进 `TickClock`，84 帧后读 `cam × scale` ——
+    **离理想滚动 `|cam - 120·t|`：修账前 12px、修账后 2px**（= 一拍的固定滞后，且从不回退）；
+    **总位移：166px → 176px**（理想 178px）。钉成单测
+    `the_camera_tracks_the_ideal_scroll_under_a_jittery_frame_rate`。
+    浏览器侧同一动作的每格耗时（应用自己的带时间戳逐格日志）从 ~283ms（3.53 格/s，慢 9%）回到
+    **263/267/257ms**（理想 266.7ms = 3.75 格/s = 16 拍/格）。
+    顺手把格点从虚拟格推广到设备格（第 21 条，2× 下 5 个台阶 vs 3 个；1× 下恒等 ⇒ 不是这次的解药），
+    并把 `the_following_camera_snaps_the_world_to_the_pixel_lattice` 挪到 1×、新增
+    `the_camera_lattice_is_the_device_pixel_grid_not_the_virtual_one`（2×，含虚拟格对照组）。
+    残余的逐帧位移 1~3px 散布已定量 = 软件 WebGL 的节拍噪声，位置误差 ≤2px 且单调 ⇒ **不是未修问题**。
+    闸门重跑（原命令）：`cargo xtask fmt --check` 净、`cargo xtask clippy` 两端 0 warning、
+    `cargo xtask check-all` 四组 0 warning、`cargo test --workspace --all-features` **240 绿 0 红**
+    （较上条 +2：`the_camera_tracks_the_ideal_scroll_under_a_jittery_frame_rate`、
+    `the_camera_lattice_is_the_device_pixel_grid_not_the_virtual_one`；
+    `cargo test -p sisf --all-features --example tiled_map` 10 → **15 绿**，
+    `cargo test -p sisf-sprite --lib` **48 绿**）、`cargo xtask golden` 两条全绿。
 - 验收（整段）：anim/route/timing 单测 + tiled_map → 提交 `P7 anim+route+tick`。→ 落地说明见 `docs/sprite.md`「T8：固定拍上的动画与任务」（两条互斥动画通路的分工表、任务三约定、`dir()/step()` 是动画状态）+ `docs/platforms.md`（letterbox 只管投影不管裁剪、HUD 必须挂更高 viewport 层）+ `docs/text.md`（文字层号：`draw_text_at`）。闸门（都用原命令）：`cargo xtask fmt --check` 净、`cargo xtask clippy`（win `--all-targets -D warnings` + wasm32 web）0 warning、`cargo xtask check-all` 四组 0 warning、`cargo test --workspace --all-features` 全绿 0 红、`cargo xtask golden` 全绿（文字基线不受新参数影响）。
 
 ### T8 期间发现并修正的事实（供后续阶段引用）
@@ -430,6 +451,36 @@
     tiled_map 的相机在 `cam.x` 夹到 224（`WORLD_W 768 - 544`）之后就不再滚，角色改成在屏内走 ——
     于是"按住 ArrowRight 25 帧、像素只变 0.1%"，量的根本不是滚动。**滚动方向上的探针要从出生格
     （12,12 ⇒ cam 128）往能滚的那侧按**（ArrowLeft/ArrowUp/ArrowDown）。
+20. **"人物不抖背景抖"的第三次报回不在映射上，在记账上：空转的一拍会让插值重播最后一步**。
+    前两条（15、18）都对之后仍然晃，真因是 `MoveRoute` 每走完一格多烧一拍"下一趟才报告完成"
+    的收尾拍（`crates/sisf-sprite/src/task.rs`）。那一拍 `prev_pos`/`pos` 原地不动，而
+    `TickClock` 照样消耗一个周期把 `alpha` 归零 ⇒ `interpolated(alpha)` 把最后一步**重播**一遍
+    （画面退回一步再走回来），每格一次；相机把角色钉在屏幕正中，于是错位的只有背景 ——
+    正是"人物不抖背景抖"的形状。修法：节点在这一拍跑完就**当场** `finish`。不变量：**每个被
+    `TickClock` 消耗的周期都必须推进 `prev_pos`/`pos`**。顺带的速度账：路线平均速度原本是
+    `tile/(ceil(tile/speed)+1)`（`32/(16+1)` ⇒ 慢 9%），不是声明值。
+    判据 = 把浏览器实测的乱节拍 `[18.2,12.1,18.2,24.3,…]` 离线复放进 `TickClock`，逐帧读
+    `cam × scale`：从不回退、`|cam - 120·t|` ≤ 2 物理像素、总位移对得上 —— 修账前偏差 12px、
+    1.486s 只滚 166px（理想 178px），修账后 2px/176px。钉成单测
+    `the_camera_tracks_the_ideal_scroll_under_a_jittery_frame_rate`；浏览器侧同一动作的每格耗时
+    从 ~283ms（3.53 格/s）回到 263/267/257ms（理想 266.7ms = 3.75 格/s）。
+    残余的逐帧位移散布（1~3px）是软件 WebGL 下 54~56fps 的节拍噪声，不是位置错误（位置单调、
+    误差 ≤2px）—— 这条要**定量登记**，别再当未修问题查。
+21. **像素格点是"设备格"不是"虚拟格"，但这条在 1× 下是恒等的（别把它当第 20 条的解药）**。
+    被重采样的是纹理，量的是 GPU 平移量 ⇒ `lattice_alpha` 的台阶应取在 `scale` 之后
+    （`(alpha × 每拍位移 × scale).round() / (每拍位移 × scale)`），相机再过一遍 `snap_to_device`。
+    2× 时一拍走 4 虚拟像素 = 8 设备像素，插值有 5 个设备格点可站（0/2/4/6/8），比只在虚拟格取整
+    的 3 个（0/4/8）更细；1× 下两者完全相同，所以它是**真实改进但不是那次抖动的修法**。
+    钉成单测 `the_camera_lattice_is_the_device_pixel_grid_not_the_virtual_one`（2×，含虚拟格对照组）。
+    另一半：`ScaleMode::IntegerFit` 下 `scale` 恒为整数 ⇒ 曾经担心的"1.5× 分数标度"这条路根本走不到，
+    要复现分数标度得换 `Fit`/`Fill`。
+22. **合成按键只能派发到 canvas，且被遮挡页面的 canvas 读回会"冻结"**（修正第 14、17 条）。
+    winit 0.30.13 的 `keydown` 绑在 canvas 元素上（`platform_impl/web/web_sys/canvas.rs:301`），
+    往 `window` 派发那一版是空转的（探针读数恒为 0）。另一半更要命：页面没在合成（嵌入式标签页
+    被遮挡）时，`drawImage` + `getImageData` 返回的是**同一份冻结缓冲**而不是空缓冲 —— 于是"每帧
+    像素 100% 相同"看着像"画面根本没动"，而应用自己的带时间戳日志证明它在动。像素探针的前提是
+    页面真的在前台合成；不能确认时改用应用侧的逐帧计数/时间戳日志（离线复放同样能出第 20 条的
+    判据）。附：逐帧 `console.log` 本身会扰动节拍（Heisenbug），聚合到 96 帧一批再打。
 
 ## T9 引擎事件总线 + 输入映射
 - [ ] `sisf-event/src/bus.rs`：`EngineEvent{Action,Key{code,kind,ch},Pointer{kind,pos,button,delta},Lifecycle,Custom(u32,serde_json::Value)}` + `EngineBus{push,drain}`。验收：drain 顺序单测。

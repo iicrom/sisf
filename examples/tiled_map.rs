@@ -740,6 +740,8 @@ struct TiledMap {
     hero_at: Vec2,
     /// 本帧烘进投影的相机，由 `prepare` 按插值后的角色位置算。
     cam: Vec2,
+    /// 本帧画 sprite 用的点阵系数，由 `prepare` 按屏幕倍率算好（`draw` 拿不到 `FrameCtx`）。
+    draw_alpha: f32,
     /// `prepare` 里是否已 push 过相机层（`pop`/`push` 成对 ⇒ 栈深恒在 1..=3）。
     cam_pushed: bool,
     stats: Option<DrawStats>,
@@ -781,6 +783,7 @@ impl TiledMap {
             decide: false,
             hero_at: lattice(HERO_CELL.0, HERO_CELL.1),
             cam: Vec2::ZERO,
+            draw_alpha: 0.0,
             cam_pushed: false,
             stats: None,
             phys: (0, 0),
@@ -1025,15 +1028,23 @@ impl TiledMap {
         );
     }
 
-    /// 把 `alpha` 折到**像素点阵**上：角色每拍走 `SPEED` 个整数虚拟像素，因此
-    /// `prev + alpha × SPEED` 只有在 `alpha × SPEED` 是整数时才落在纹素格点上。取整它 ⇒
-    /// 相机（= 该点减一个整数常量）与角色画的点同时落在格点上，地图不再被搬到纹素中间
-    /// 重采样。代价是位移按 1px 台阶走（`SPEED = 2` ⇒ 一拍两步），而这正是像素美术该有的
-    /// 走法：真亚像素滚动的代价是整张地图糊掉再来回晃（第二次报回的抖动）。
+    /// 把 `alpha` 折到**设备像素点阵**上：采样发生在物理像素上，所以要让
+    /// `prev + alpha × SPEED` 乘倍率之后是整数 —— 即 `alpha × SPEED × scale` 取整。倍率 1 时
+    /// 这就是"每拍 `SPEED` px 拆成 1px 台阶"；倍率 2 时一拍走 4 个虚拟像素 = 8 个物理像素，
+    /// 插值有 5 个台阶可站（0/2/4/6/8），比只在虚拟格取整的 3 个（0/4/8）更细。
+    /// 本示例是 `IntegerFit` ⇒ 倍率恒为整数；非整数倍率（换 `Fit`/`Fill`）下台阶是
+    /// `1 / (SPEED × scale)` 个虚拟像素。
     ///
-    /// 前提：`SPEED` 与图块格点都是整数，且角色的位移只来自 walk 节点（每拍 `SPEED` px）。
-    fn lattice_alpha(alpha: f32) -> f32 {
-        (alpha * SPEED).round() / SPEED
+    /// 代价是位移按整物理像素分级（正是像素美术该有的走法）；真亚像素滚动的代价是整张地图
+    /// 糊掉再来回晃。前提：`SPEED` 与图块格点都是整数，且角色的位移只来自 walk 节点。
+    fn lattice_alpha(alpha: f32, scale: f32) -> f32 {
+        (alpha * SPEED * scale).round() / (SPEED * scale)
+    }
+
+    /// 把相机折到**设备像素**格点上：`ctx.scale` 是虚拟 → 物理的等比倍率，只有 `cam × scale`
+    /// 是整数时，地图的采样相位才不随帧变化（角色因此也恰好钉在屏幕中心，见单测里的推导）。
+    fn snap_to_device(v: Vec2, scale: f32) -> Vec2 {
+        Vec2::new((v.x * scale).round() / scale, (v.y * scale).round() / scale)
     }
 
     /// 相机：把角色视觉中心带到视口中心，再夹在地图里（贴边时空出的是地图外，不该滚）。
@@ -1246,17 +1257,20 @@ impl App for TiledMap {
     /// `(1 - alpha) × SPEED` 像素（第一次报回的抖动）；而这个点还须落在像素格点上，否则整张
     /// 地图跟着亚像素晃（第二次报回的抖动）。
     fn prepare(&mut self, alpha: f32, ctx: &mut FrameCtx) {
+        let scale = ctx.scale;
+        let a = Self::lattice_alpha(alpha, scale);
+        self.draw_alpha = a;
         let hero = self
             .arena
             .get(self.hero)
-            .map_or(self.hero_at, |h| h.interpolated(Self::lattice_alpha(alpha)));
-        self.cam = Self::camera_for(hero);
+            .map_or(self.hero_at, |h| h.interpolated(a));
+        self.cam = Self::snap_to_device(Self::camera_for(hero), scale);
         self.push_camera(ctx);
     }
 
-    fn draw(&mut self, alpha: f32, renderer: &mut Renderer) {
+    fn draw(&mut self, _alpha: f32, renderer: &mut Renderer) {
         // 与 `prepare` 推相机用的是同一个点阵系数：投影与 sprite 只能同相位、同格点。
-        let alpha = Self::lattice_alpha(alpha);
+        let alpha = self.draw_alpha;
         self.frame += 1;
         self.load_font();
         // 槽容量配到精灵数：整帧一片，批数才是纯合批结果（只设一次，避免重建缓冲）。
@@ -1508,7 +1522,7 @@ mod tests {
                 .arena
                 .get(hero)
                 .unwrap()
-                .interpolated(TiledMap::lattice_alpha(alpha));
+                .interpolated(TiledMap::lattice_alpha(alpha, ctx.scale));
             let f = ctx.frame_u(0.0);
             let p = xform(&f.proj[WORLD.0 as usize], [drawn.x, drawn.y, 0.0, 1.0]);
             let ndc = (p[0] / p[3], p[1] / p[3]);
@@ -1553,7 +1567,10 @@ mod tests {
     #[test]
     fn the_following_camera_snaps_the_world_to_the_pixel_lattice() {
         let mut app = TiledMap::new();
-        let mut ctx = FrameCtx::new(&config(), (1088, 832), 1.0);
+        // 倍率 1（544×416）：这一档虚拟格点 == 物理格点，先单独钉住"相机不能在亚像素上"。
+        // 倍率 ≥ 2 时两者差 `scale` 倍，那是下面 `..._device_pixel_grid_...` 那条的职责。
+        let mut ctx = FrameCtx::new(&config(), (544, 416), 1.0);
+        assert_eq!(ctx.scale, 1.0);
         let from = lattice(12, 12);
         let to = Vec2::new(from.x + SPEED, from.y);
         let hero = app.hero;
@@ -1575,7 +1592,7 @@ mod tests {
                 .arena
                 .get(hero)
                 .unwrap()
-                .interpolated(TiledMap::lattice_alpha(alpha));
+                .interpolated(TiledMap::lattice_alpha(alpha, ctx.scale));
             assert!(on_grid(d), "alpha {alpha} 下角色画在格点外: {d:?}");
             steps.push(d.x - from.x);
         }
@@ -1597,6 +1614,138 @@ mod tests {
         assert!(
             !on_grid(TiledMap::camera_for(raw)),
             "对照组失效：未取整的相机本来该落在格点外，实际 {raw:?}"
+        );
+    }
+
+    /// 上一条只覆盖倍率 1。**采样发生在物理像素上**，所以格点也得是物理格点：`lattice_alpha`
+    /// 与 `snap_to_device` 取整的都是 `× scale` 之后的坐标。倍率 2 下按虚拟像素取整等于把台阶
+    /// 粗了一倍（一拍 4 个物理像素只能踩 0/2/4 三个点），地图每帧要么不动要么跳两格 —— 角色被
+    /// 相机钉死在屏幕正中，于是这种"粗"全部落在背景上。（第三次报回的"人物不抖背景抖"另有真因
+    /// = `MoveRoute` 的收尾拍，见下面那条节拍回放单测；本条只是顺带把格点推广对。）
+    #[test]
+    fn the_camera_lattice_is_the_device_pixel_grid_not_the_virtual_one() {
+        let mut app = TiledMap::new();
+        // 1088×832 配 544×416 ⇒ `IntegerFit` 正好 2×。
+        let mut ctx = FrameCtx::new(&config(), (1088, 832), 1.0);
+        assert_eq!(ctx.scale, 2.0);
+        let from = lattice(12, 12);
+        let to = Vec2::new(from.x + SPEED, from.y);
+        let hero = app.hero;
+        app.arena.get_mut(hero).unwrap().teleport(from);
+        app.arena.get_mut(hero).unwrap().set_pos(to);
+
+        let scale = ctx.scale;
+        let alphas = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+        let mut cam_dev = Vec::new();
+        let mut hero_phase = Vec::new();
+        let mut hero_on_screen = Vec::new();
+        for alpha in alphas {
+            app.prepare(alpha, &mut ctx);
+            let c = app.cam.x * scale;
+            assert!(
+                c == c.round(),
+                "alpha {alpha} 下相机不在物理格点上: cam={:?} ×{scale}={c}",
+                app.cam
+            );
+            cam_dev.push(c);
+            let d = app
+                .arena
+                .get(hero)
+                .unwrap()
+                .interpolated(TiledMap::lattice_alpha(alpha, scale));
+            let dev = d.x * scale;
+            assert!(
+                dev == dev.round(),
+                "alpha {alpha} 下角色不在物理格点上: {d:?} ×{scale}={dev}"
+            );
+            hero_phase.push(dev - dev.round());
+            hero_on_screen.push((d.x - app.cam.x) * scale);
+        }
+        // 角色的物理相位一动不动（贴图不会每帧换采样点），且它相对画面钉死。
+        let spread = |v: &[f32]| {
+            v.iter().cloned().fold(f32::MIN, f32::max) - v.iter().cloned().fold(f32::MAX, f32::min)
+        };
+        assert!(
+            spread(&hero_phase) < 1e-4,
+            "角色的物理相位在漂: {hero_phase:?}"
+        );
+        assert!(
+            spread(&hero_on_screen) < 1e-3,
+            "角色在屏幕上被相机甩了: {hero_on_screen:?}"
+        );
+        // 一拍 `SPEED × scale = 4` 个物理像素，被拆成 0/1/2/3/4 五级台阶 —— 物理格点能给的
+        // 最细走法。对照组：按虚拟像素取整（上一版的 `round(alpha × SPEED) / SPEED`）在同一拍
+        // 里只给 0/2/4，一半的物理像素位置被白白跳过。
+        let mut uniq: Vec<f32> = cam_dev.clone();
+        uniq.dedup();
+        assert_eq!(
+            uniq,
+            vec![256.0, 257.0, 258.0, 259.0, 260.0],
+            "一拍该有 5 个物理台阶: {cam_dev:?}"
+        );
+        let virtual_lattice: Vec<f32> = alphas
+            .iter()
+            .map(|a| (a * SPEED).round() * scale + cam_dev[0])
+            .collect();
+        let mut coarse = virtual_lattice.clone();
+        coarse.dedup();
+        assert_eq!(
+            coarse,
+            vec![256.0, 258.0, 260.0],
+            "对照组失效：虚拟格点本该只给 0/2/4"
+        );
+    }
+
+    /// 第三次报回的抖动（"还是抖，人物不抖背景抖"）回归：把浏览器实测的乱拍（54fps 上下，
+    /// 12/18/24ms 交替）喂进 `TickClock`，逐帧读相机的物理位置。
+    ///
+    /// 判据不是"每帧位移相等"（帧率本身在抖，做不到），而是**相机始终贴着理想位置**：
+    /// `|cam − 理想位移| ≤ 2` 个物理像素（那 2px 是"画的是上一拍的结果"带来的固定滞后），
+    /// 且从不回退。角色被相机钉在屏幕正中，所以这条曲线的误差就是用户看到的背景抖动量。
+    ///
+    /// 出处是 `MoveRoute` 的收尾拍：路线跑完的那一拍不当场报告完成，下一拍 `prev_pos`/`pos`
+    /// 原地不动而 `alpha` 照旧归零重数 ⇒ 每 17 拍白停一拍，误差读到 12px、平均速度掉 9%。
+    #[test]
+    fn the_camera_tracks_the_ideal_scroll_under_a_jittery_frame_rate() {
+        let mut app = TiledMap::new();
+        let mut ctx = FrameCtx::new(&config(), (544, 416), 1.0);
+        let scale = ctx.scale;
+        app.keys.set(Dir::Up, true);
+        let mut clock = sisf::app::TickClock::new(60.0);
+        let period = clock.period();
+        // 一次 rAF 采样的实测节拍：18.2ms 为主，掺 12.1/24.3ms（均值 17.7ms ⇒ 56.5fps）。
+        let cadence = [
+            18.2, 12.1, 18.2, 24.3, 18.2, 12.1, 18.2, 18.2, 24.3, 18.2, 12.1, 18.2,
+        ];
+        let mut seq = Vec::new();
+        let mut times = Vec::new();
+        let mut t = 0.0f64;
+        for i in 0..84 {
+            t += cadence[i % cadence.len()] / 1000.0;
+            times.push(t);
+            for _ in 0..clock.step(Duration::from_secs_f64(cadence[i % cadence.len()] / 1000.0)) {
+                app.tick(period, &mut ctx);
+            }
+            app.prepare(clock.alpha(), &mut ctx);
+            seq.push(app.cam.y * scale);
+        }
+        assert!(
+            seq.windows(2).all(|w| w[1] <= w[0]),
+            "相机回退了（地图朝反方向弹一下）: {seq:?}"
+        );
+        let worst = (0..seq.len())
+            .map(|k| ((seq[k] - seq[0]) as f64 + (120.0 * times[k]).round()).abs())
+            .fold(0.0f64, f64::max);
+        assert!(
+            worst <= 2.0,
+            "相机离理想滚动位置最远 {worst} 物理像素（该 ≤2，即一拍的固定滞后）"
+        );
+        // 位移总量也得对得上：84 帧 = 1.486s ⇒ 理想 178px，收尾拍那一档只走出 166px。
+        let moved = seq[0] - seq[seq.len() - 1];
+        let ideal_total = (120.0 * t).round() as f32;
+        assert!(
+            (moved - ideal_total).abs() <= 2.0,
+            "{t:.3}s 里只滚了 {moved}px，理想 {ideal_total}px"
         );
     }
 

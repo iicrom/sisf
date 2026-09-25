@@ -600,6 +600,13 @@ impl Task for MoveRoute {
                 RouteMode::Free => self.move_to_free(sprite, Vec2::new(x, y)),
             },
         }
+        // 节点表在这一拍跑完 ⇒ **当场**收尾。留一拍"下一趟才报告完成"看着无害，实际是每格
+        // 白烧一拍：那一拍 `prev_pos`/`pos` 原地不动，而 `TickClock` 照旧消耗一个周期把
+        // `alpha` 归零，于是 `interpolated(alpha)` 把最后一步重播一遍（画面退回一步再走回来），
+        // 且整条路线的平均速度低成 `tile/(ceil(tile/speed)+1)` 拍。
+        if self.finished() {
+            return self.finish(sprite);
+        }
         false
     }
 
@@ -763,8 +770,17 @@ mod tests {
         assert_eq!(seen[0], (8.0, DIR_RIGHT, 0), "第一拍只往前走，还没换帧");
         assert_eq!(seen[3], (32.0, DIR_RIGHT, 1), "4 拍一格，进格才换步帧");
         assert_eq!(seen[7], (64.0, DIR_RIGHT, 2));
-        assert_eq!(seen[11], (96.0, DIR_RIGHT, 1), "步帧循环 1↔2，不踩站立帧");
-        assert_eq!(seen[12], (96.0, DIR_RIGHT, 0), "跑完收步帧站住");
+        assert_eq!(
+            seen[10],
+            (88.0, DIR_RIGHT, 2),
+            "步帧循环 1↔2，走路途中不踩站立帧"
+        );
+        assert_eq!(
+            seen[11],
+            (96.0, DIR_RIGHT, 0),
+            "走完最后一格的那一拍当场收尾站住"
+        );
+        assert_eq!(seen[12], (96.0, DIR_RIGHT, 0), "收尾拍不再白烧一拍");
         assert_eq!(arena.get(handle).unwrap().pos.x, 96.0);
         // 换帧落到 `src` 上：右那一行的第 0 列（采集通路对动画一无所知）。
         assert_eq!(
@@ -996,10 +1012,12 @@ mod tests {
             Rect::new(0.0, 144.0, 32.0, 48.0),
             "上 = 第 3 行（格高 48）"
         );
-        // Turn(1) + Wait(2) = 3 拍，第 4 拍报告完成并被摘掉 —— 路线时长完全可预测。
+        // Turn(1) + Wait(2) = 3 拍：第 3 拍**当场**报告完成并被摘掉。旧写法要多烧一拍才报告
+        // 完成，而那一拍 `prev_pos`/`pos` 原地不动、`alpha` 照旧归零重数，`interpolated(alpha)`
+        // 于是把最后一步重播一遍 —— 跟随相机下抖的正是整张地图（见 tiled_map 的节拍回放单测）。
         assert_eq!(sched.tick(&mut arena), 0);
-        assert_eq!(sched.tick(&mut arena), 0);
-        assert_eq!(sched.tick(&mut arena), 1);
+        assert_eq!(sched.tick(&mut arena), 1, "3 拍跑完，不多烧收尾拍");
+        assert!(sched.is_empty(), "完成的那一拍就该摘掉");
         assert_eq!(
             arena.get(handle).unwrap().pos,
             Vec2::ZERO,

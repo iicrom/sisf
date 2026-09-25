@@ -89,6 +89,11 @@ layer、再按图集页、再按 blend 分批次，`z` 只在同批次内决定�
 队列默认并行，`MoveRoute::wait(true)` 独占该精灵的队列（RPG Maker 事件指令的"等待移动完成"）。
 `MoveRoute` 有网格与自由两种模式，网格模式逐格走、`walkable` 钩子拿的是**逐拍坐标**且必须 own
 通行表（示例里因此是 `pass.clone()` 进闭包），撞墙只作废本节点的剩余格数、不作废整条路线。
+**"路线时长 = 各节点拍数之和"是有代价的**：`step` 在最后一格走完的**那一拍**就要返回 `true`
+（`finish` 当场收尾），不能留一拍"下一趟才报告完成"。看着无害的收尾拍会让一个被消耗的周期不推进
+`prev_pos`/`pos`，而 `TickClock` 照样消耗周期、把 `alpha` 归零 ⇒ 渲染端把最后一步重播一遍
+（每格一次），整条路线还慢一拍一格（`tile/(ceil(tile/speed)+1)` 而非声明值）。不变量：
+**每个被 `TickClock` 消耗的周期都必须推进 `prev_pos`/`pos`**。
 
 **插值点只有一个消费者是不够的：相机也得看见它**。`collect_at(view, alpha, ..)` 把精灵画在
 `Sprite::interpolated(alpha)`，而跟随相机是 viewport 栈上的一层、投影在 `draw` 之前就烘完了 ⇒
