@@ -287,7 +287,15 @@
 - [x] `examples/tiled_map.rs`：三层 tilemap（地面/事件/上方，图块 32/48）+ 键盘 4 向行走 + 事件格碰撞。验收：桌面 IntegerFit 544×416 + wasm 手测。→ 示例注册 `required-features=["image"]` + `test=true`，`cargo test -p sisf --all-features --example tiled_map` **10 绿**（地图形状/边框封死、格点阵往返、相机居中后夹边、三层 z 序 ground<decal<y-sort<above、`MoveRoute` 撞在真实通行表上、位图区域不越界、预乘 alpha + 空边距、按键 held 语义、HUD 层净投影、四向键）。美术整张程序生成（256×288 单页 ⇒ 单 epoch ⇒ y 排序有全序权），不新增素材/依赖。桌面 IntegerFit 实测（`cargo run --release -p sisf --features image --example tiled_map`，日志 + 抓屏像素扫描）：
   - `物理 800x600 ⇒ 画面 (128,92) 544x416，倍率 1.00，光栅档 1` / `物理 1185x862 ⇒ 画面 (48,15) 1088x832，倍率 2.00，光栅档 2`；`第 1 帧合成: batches 4 quads 728 sprites 637 pages 1 tier 1x`（三层 + HUD 合成 4 批）。
   - 键盘链路由 `PostMessageW` 打方向键走真窗口：`角色到格 13,8（相机 174,56）` → `16,12` → 北向 `16,8…13,4`，相机跟着挪并在北边/西边夹住（`cam 224,184`→`224,70`→`160,0`）；`Enter` 打出 `宝箱打开，该格转为可走`，随后同一格走得过去（碰撞表被事件改掉）。
-  - 边条不渗色（像素级）：修前 800×600 的 y=300 一行在 client x∈[0,127] 上是石墙/草地色；修后同一行 client x=0..127 恒为清屏色 `rgb(10,15,23)`、x=136（= 画面左沿）起才有内容；2× 下图区左沿正好落在 client x=48；顶条整行（client 0..1184）零跳变。HUD 可读性：1× 的 HUD 带内 ≥200 亮度像素 1417 个（同图地图区只有 56 个 = 灯火），2× 带内 6148 个，裁剪 1:1 读数 `tick 25472 a0.92 cell 13,4 cam 160,0` / `opened the chest`。⚠️ **wasm 手测待用户开页面**（`cargo xtask web tiled_map` 已把 pkg 生成到 `web/pkg/tiled_map.js`，:8080 上的静态服务直接可访问 `http://127.0.0.1:8080/?ex=tiled_map&wgl`；日志通道 = `platform::log_info` 进 console）。
+  - 边条不渗色（像素级）：修前 800×600 的 y=300 一行在 client x∈[0,127] 上是石墙/草地色；修后同一行 client x=0..127 恒为清屏色 `rgb(10,15,23)`、x=136（= 画面左沿）起才有内容；2× 下图区左沿正好落在 client x=48；顶条整行（client 0..1184）零跳变。HUD 可读性：1× 的 HUD 带内 ≥200 亮度像素 1417 个（同图地图区只有 56 个 = 灯火），2× 带内 6148 个，裁剪 1:1 读数 `tick 25472 a0.92 cell 13,4 cam 160,0` / `opened the chest`。
+  - wasm 手测（`http://127.0.0.1:8080/?ex=tiled_map&wgl`，ANGLE Microsoft Basic Render Driver /
+    WebGL2）：`物理 544x416 ⇒ 画面 (0,0) 544x416，倍率 1.00，光栅档 1` → `字体 Some("Inter")（face 1）`
+    → HUD `tick 2431 a0.15 cell 12,12 cam 128,184` / `batches 4 quads 737 sprites 637 pages 1 tier 1x`
+    （与桌面同一读数）。按住方向键（合成 `keydown`/`keyup` 派发）逐格日志：北向
+    `12,11→12,10→12,9→12,8→12,7`（相机 `128,166→…→128,38`），再东向 `13,7→14,7→15,7`、北向
+    `15,6→15,5` 且相机在北边夹住（`cam 224,0`）⇒ 键盘→`MoveRoute`→相机整条链在 wasm 上通。
+    ⚠️ 首帧那行 `第 1 帧合成: batches 0 quads 0` 是真的：`stats()` 读上一次 `end_frame` 的账，
+    而 wasm 的第一帧跑在尺寸到货之前（0×0 的空 scissor），桌面则第一帧就有尺寸。
 - 验收（整段）：anim/route/timing 单测 + tiled_map → 提交 `P7 anim+route+tick`。→ 落地说明见 `docs/sprite.md`「T8：固定拍上的动画与任务」（两条互斥动画通路的分工表、任务三约定、`dir()/step()` 是动画状态）+ `docs/platforms.md`（letterbox 只管投影不管裁剪、HUD 必须挂更高 viewport 层）+ `docs/text.md`（文字层号：`draw_text_at`）。闸门（都用原命令）：`cargo xtask fmt --check` 净、`cargo xtask clippy`（win `--all-targets -D warnings` + wasm32 web）0 warning、`cargo xtask check-all` 四组 0 warning、`cargo test --workspace --all-features` 全绿 0 红、`cargo xtask golden` 全绿（文字基线不受新参数影响）。
 
 ### T8 期间发现并修正的事实（供后续阶段引用）
@@ -337,6 +345,18 @@
     `MapVirtualKeyW` 的 scan code（方向键再加扩展位 `0x1000000`）能驱动 winit 输入 ⇒ 键盘链路可在
     没有人点击窗口的情况下取证。另外 Git Bash 的 `kill $PID` 杀不掉 Windows 进程，残留示例会锁住
     `target/.../<example>.exe` 报 `LNK1104`，要用 `Get-Process <name> | Stop-Process -Force`。
+12. **wasm 上的 panic 到 JS 只剩 `RuntimeError: unreachable`，原文与位置全丢** ⇒ "页面黑着、
+    console 一行不涨"这种现场根本没法查（T8e 第一次 wasm 手测就是这样）。`platform/wasm.rs::run`
+    现在第一件事就是装 panic 钩子，把 payload + `file:line` 送进 console（`log_error`）。这条钩子
+    是本次定位真因的唯一途径，写进 `docs/platforms.md` 的 Web 一节。
+13. **一个 face 都没有时不能把排字请求交给 cosmic-text**：`shape.rs` 里那句
+    `font_iter.next().expect("no default font found")` 直接 panic，而 wasm 上"自带字体还在 fetch
+    路上"是每帧都会经过的常态（`FontSystem::new()` 在 wasm 扫不到系统字体）⇒ 第一次排字就把 rAF
+    链打断。`layout_with` 先查 `db().is_empty()` 返回空 `TextRun`（行高照常给），"没字体 = 字形不
+    出现"这条约定才真的成立。断言 `an_empty_font_system_lays_out_nothing_instead_of_trapping`。
+14. **wasm 侧的键盘链路可以无人值守取证**：往 canvas 与 window 派发合成的
+    `KeyboardEvent('keydown'/'keyup', {code:'ArrowUp'})`、中间 `setTimeout` 挂住不放，winit 照收
+    ⇒ "按住 N 毫秒 ⇒ 逐格走 N 格"这类断言能在浏览器里复现，不必真人按键。
 
 ## T9 引擎事件总线 + 输入映射
 - [ ] `sisf-event/src/bus.rs`：`EngineEvent{Action,Key{code,kind,ch},Pointer{kind,pos,button,delta},Lifecycle,Custom(u32,serde_json::Value)}` + `EngineBus{push,drain}`。验收：drain 顺序单测。

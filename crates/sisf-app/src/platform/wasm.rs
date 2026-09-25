@@ -65,7 +65,27 @@ fn canvas_from_document() -> Option<web_sys::HtmlCanvasElement> {
     element.dyn_into::<web_sys::HtmlCanvasElement>().ok()
 }
 
+/// wasm 下 panic 到 JS 只剩一个 `RuntimeError: unreachable`，原文与位置全丢，而 rAF 链一断
+/// 页面就定格成黑屏 —— 没有这条钩子，浏览器侧的失败根本不可诊断。
+fn install_panic_hook() {
+    // 重复安装只会返回 `Err`，而这里没有可恢复的动作可做（钩子本身是尽力而为的诊断通道）。
+    std::panic::set_hook(Box::new(|info| {
+        let payload = info.payload();
+        let msg: &str = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("panic");
+        let loc = info
+            .location()
+            .map(|l| format!(":{}:{}", l.file(), l.line()))
+            .unwrap_or_default();
+        crate::platform::log_error(&format!("[sisf-app] panic: {msg}{loc}"));
+    }));
+}
+
 pub fn run<A: App + 'static>(app: A, config: AppConfig) -> Result<(), Box<dyn Error>> {
+    install_panic_hook();
     install_visibility_watcher();
     let event_loop =
         EventLoop::new().map_err(|e: EventLoopError| -> Box<dyn Error> { e.into() })?;

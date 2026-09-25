@@ -64,6 +64,10 @@ cargo xtask web           # 构建 wasm + wasm-bindgen 到 web/pkg，并在 127.
 - `visibilitychange` 映射为挂起：页面隐藏时上报 `Lifecycle::Suspended` 并停帧，
   浏览器暂停 rAF 也不会吃时间（累加器在 T8 同样冻结）。
 - 需要 `hello_window_bg.wasm` 的 MIME 为 `application/wasm`（xtask 内置服务已处理）。
+- **panic 会送到 console**（`platform/wasm.rs::install_panic_hook`，`run` 第一件事）：wasm 上
+  Rust panic 到 JS 只剩一个 `RuntimeError: unreachable`，原文与位置全丢，而 rAF 链一断页面就
+  定格成黑屏 —— 没有任何可诊断输出。T8e 的"打不开、也没日志"就是靠这条钩子才认出真因是
+  cosmic-text 的 `expect("no default font found")`（见 `docs/text.md` wasm 约束第 3 条）。
 
 ## Android
 

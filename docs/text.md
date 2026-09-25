@@ -195,6 +195,12 @@ wasm 的两条硬约束（不是空实现，是平台事实）：
    手测时不必猜。
 2. **`eprintln!` 在浏览器里看不见**。`FontBundle` 的回退 warn 因此只在桌面/Android 有效；
    wasm 上自查用 `FontBundle::fallback()` / `is_fallback()` / `face_count()`。
+3. **一个 face 都没有时不能把请求交给 cosmic-text**（T8e 实测）。`shape.rs` 里那句
+   `font_iter.next().expect("no default font found")` 会直接 panic，而 wasm 上"字体还在 fetch
+   路上"是每帧都会经过的常态 ⇒ 排一次字就把整条 rAF 链打断，页面定格成黑屏。所以
+   `layout_with` 先查 `db().is_empty()` 就返回空 `TextRun`（行高照常给，盒布局不塌）：
+   "没字体 = 字形不出现"这条约定到这里才真的成立。断言
+   `an_empty_font_system_lays_out_nothing_instead_of_trapping`（含"有字体时必须排得出字"的反向对照）。
 
 ## 能力矩阵（不支持项）
 
@@ -214,7 +220,7 @@ wasm 的两条硬约束（不是空实现，是平台事实）：
 ```
 cargo xtask golden          # 现在跑 GOLDENS 两条：sprite_scene + text_scene
 cargo xtask golden --bless  # 重写基线（确认过差异是预期变更之后）
-cargo test --workspace      # 文本 29 单测 + golden 1；渲染侧新增 clip/会话 16 单测
+cargo test --workspace      # 文本 30 单测 + golden 1；渲染侧新增 clip/会话 16 单测
 cargo xtask check-all && cargo xtask clippy && cargo xtask fmt --check
 cargo run --release -p sisf --example windows        # 桌面手测
 cargo xtask web windows                              # wasm：http://127.0.0.1:8080/?ex=windows&wgl

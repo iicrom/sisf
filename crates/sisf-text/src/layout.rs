@@ -170,6 +170,18 @@ pub fn layout(bundle: &mut FontBundle, text: &str, style: &TextStyle) -> TextRun
 /// 上面那行的实现体（`TextEngine` 直接拿 `FontSystem` 时也用它）。
 pub(crate) fn layout_with(fonts: &mut FontSystem, text: &str, style: &TextStyle) -> TextRun {
     let (size, line_height) = (style.size.max(1.0), style.line_height.max(1.0));
+    // cosmic-text 0.19 在候选表为空时直接 `expect("no default font found")`（`shape.rs`），
+    // 而 wasm 上"一个 face 都没有"是常态（无系统字体，自带字体还在 fetch 路上）⇒ 排一次字
+    // 就把整条 rAF 链打断。`bundle.rs` 的约定是"没字体就字形不出现，不放空实现也不 panic"，
+    // 所以这里自己先判空，绝不把请求交给 cosmic-text 的 fallback。
+    if fonts.db().is_empty() {
+        return TextRun {
+            lines: Vec::new(),
+            width: 0.0,
+            height: line_height,
+            line_height,
+        };
+    }
     let mut buf = Buffer::new_empty(Metrics::new(size, line_height));
     if style.wrap_width.is_some() {
         // 词边界优先、单个超长词按字形折 —— 中英混排的换行要靠它（中文没有空格）。
@@ -224,6 +236,33 @@ mod tests {
 
     fn bundle() -> FontBundle {
         FontBundle::from_bytes(INTER)
+    }
+
+    /// wasm 上的常态：一个 face 都还没有（无系统字体，自带字体还在 fetch 路上）。
+    /// cosmic-text 遇到这种状态是 `expect("no default font found")`，所以判空必须发生在
+    /// 把请求交给它**之前** —— 断言写成"不 panic 且没有字形"，跑在桌面也一样成立。
+    #[test]
+    fn an_empty_font_system_lays_out_nothing_instead_of_trapping() {
+        let mut empty =
+            FontSystem::new_with_locale_and_db(String::new(), cosmic_text::fontdb::Database::new());
+        let run = layout_with(&mut empty, "Hello 引擎", &TextStyle::new(16.0));
+        assert!(
+            run.lines.is_empty(),
+            "没有字体却排出了 {} 行",
+            run.lines.len()
+        );
+        assert_eq!(run.width, 0.0);
+        assert_eq!(
+            run.height, run.line_height,
+            "空排也该有行高，调用方的盒布局不该塌"
+        );
+        // 反向对照：同一串字在有字体时必须排得出字形，否则上面那条断言就成了恒真。
+        let mut b = bundle();
+        assert!(
+            !layout(&mut b, "Hello 引擎", &TextStyle::new(16.0))
+                .lines
+                .is_empty()
+        );
     }
 
     #[test]
