@@ -4,6 +4,7 @@
 //! flip_x/flip_y/z/visible/blend_type`），字段公开、无 setter 仪式。采集与实例生成在
 //! [`crate::draw`]，能力边界（哪些 tone/blend 有通路）见 `docs/sprite.md`。
 
+use crate::anim::AnimState;
 use sisf_render::{Bitmap, Blend, WHITE_EPOCH};
 
 /// 二维量。`pos` 与 `Sprite::extent` 是虚拟像素，`anchor`/`scale` 是比值。
@@ -21,6 +22,49 @@ impl Vec2 {
 
     pub const fn new(x: f32, y: f32) -> Self {
         Self { x, y }
+    }
+
+    /// 线性插值（T8 的 tick 间插值：`t = 0` 取上一 tick 的位置，`t = 1` 取当前的）。
+    pub fn lerp(self, to: Vec2, t: f32) -> Self {
+        Self {
+            x: self.x + (to.x - self.x) * t,
+            y: self.y + (to.y - self.y) * t,
+        }
+    }
+
+    /// 模长（自由路线用它算剩余距离）。
+    pub fn length(self) -> f32 {
+        (self.x * self.x + self.y * self.y).sqrt()
+    }
+}
+
+impl std::ops::Add for Vec2 {
+    type Output = Vec2;
+    fn add(self, rhs: Vec2) -> Vec2 {
+        Self {
+            x: self.x + rhs.x,
+            y: self.y + rhs.y,
+        }
+    }
+}
+
+impl std::ops::Sub for Vec2 {
+    type Output = Vec2;
+    fn sub(self, rhs: Vec2) -> Vec2 {
+        Self {
+            x: self.x - rhs.x,
+            y: self.y - rhs.y,
+        }
+    }
+}
+
+impl std::ops::Mul<f32> for Vec2 {
+    type Output = Vec2;
+    fn mul(self, rhs: f32) -> Vec2 {
+        Self {
+            x: self.x * rhs,
+            y: self.y * rhs,
+        }
     }
 }
 
@@ -116,6 +160,13 @@ pub struct Sprite {
     pub anchor: Vec2,
     /// 锚点在虚拟空间里的位置（当前 viewport 坐标系，左上原点、y 向下）。
     pub pos: Vec2,
+    /// 上一个 tick 的 `pos`：固定步长 + `draw(alpha)` 的插值起点（T8）。
+    ///
+    /// 采集时画的是"`[prev_pos, pos]` 按 `alpha` 取点"，所以逐 tick 位移要走
+    /// [`Sprite::set_pos`]（它把旧的 `pos` 挪进本字段）。不想被插值的跳变（传送、
+    /// 读档、路线起点）一律走 [`Sprite::teleport`]：一次改两个值。直接写 `pos`
+    /// 是最坏的那种写法 —— 本字段会停在原地，精灵从出生点一路"滑"过来。
+    pub prev_pos: Vec2,
     /// 逐轴缩放（可为负，与 `flip_*` 叠加）。
     pub scale: Vec2,
     /// 绕锚点旋转（弧度）。
@@ -132,6 +183,10 @@ pub struct Sprite {
     pub blend: BlendMode,
     /// 归属标签：默认只被同一层的采集取走（[`Layer::MAIN`]）。
     pub layer: Layer,
+    /// 动画状态（`Some` 时 [`Rect`] `src` 由它持有，见 [`crate::anim`]）。
+    ///
+    /// 挂/摘走 [`Sprite::set_animation`]，它顺手把当前帧落进 `src`。
+    pub anim: Option<AnimState>,
 }
 
 impl Default for Sprite {
@@ -141,6 +196,8 @@ impl Default for Sprite {
             src: Rect::ZERO,
             anchor: Vec2::ZERO,
             pos: Vec2::ZERO,
+            // 与 `pos` 同一个值：新精灵没有"上一 tick"，插值不该把它拖回原点。
+            prev_pos: Vec2::ZERO,
             scale: Vec2::ONE,
             rotation: 0.0,
             opacity: 1.0,
@@ -151,6 +208,7 @@ impl Default for Sprite {
             visible: true,
             blend: BlendMode::Normal,
             layer: Layer::MAIN,
+            anim: None,
         }
     }
 }
@@ -185,6 +243,24 @@ impl Sprite {
     /// 批次键里的纹理代号：所在图集页的 epoch，无位图时是内置白图。
     pub fn epoch(&self) -> u64 {
         self.bitmap.as_ref().map_or(WHITE_EPOCH, Bitmap::epoch)
+    }
+
+    /// 逐 tick 移动走这里：旧的 `pos` 挪进 [`Sprite::prev_pos`]，`draw(alpha)` 因此在
+    /// 两个 tick 之间插值（固定步长的全部意义）。
+    pub fn set_pos(&mut self, pos: Vec2) {
+        self.prev_pos = self.pos;
+        self.pos = pos;
+    }
+
+    /// 不该被插值的跳变（传送、读档、路线起点）：一次改两个值。
+    pub fn teleport(&mut self, pos: Vec2) {
+        self.prev_pos = pos;
+        self.pos = pos;
+    }
+
+    /// `prev_pos`/`pos` 按 `alpha` 取点（`collect` 的落点）。
+    pub fn interpolated(&self, alpha: f32) -> Vec2 {
+        self.prev_pos.lerp(self.pos, alpha)
     }
 }
 
@@ -226,5 +302,25 @@ mod tests {
     #[test]
     fn matrix_tone_has_no_pipeline() {
         assert_eq!(Tone::Matrix([0.0; 20]).as_instance_vec(), None);
+    }
+
+    /// 固定步长的插值对：`set_pos` 留痕、`teleport` 不留痕。
+    #[test]
+    fn set_pos_tracks_the_previous_tick_and_teleport_does_not() {
+        let mut s = Sprite::default();
+        s.teleport(Vec2::new(10.0, 4.0));
+        assert_eq!(s.prev_pos, s.pos);
+        s.set_pos(Vec2::new(12.0, 4.0));
+        assert_eq!(
+            (s.prev_pos, s.pos),
+            (Vec2::new(10.0, 4.0), Vec2::new(12.0, 4.0))
+        );
+        // alpha = 0 是上一 tick 的样子，1 是当前的，0.5 在正中。
+        assert_eq!(s.interpolated(0.0), Vec2::new(10.0, 4.0));
+        assert_eq!(s.interpolated(1.0), Vec2::new(12.0, 4.0));
+        assert_eq!(s.interpolated(0.5), Vec2::new(11.0, 4.0));
+        // 传送之后中途取点也还在原地（两值相同 ⇒ 插值退化成常量）。
+        s.teleport(Vec2::new(100.0, 100.0));
+        assert_eq!(s.interpolated(0.0), s.interpolated(0.5));
     }
 }

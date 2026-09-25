@@ -14,6 +14,10 @@
 //! - **不驱逐**：一个 (字体, 字号, 字形) 一旦落位就活到进程结束。游戏字号只有几档，
 //!   页满到 [`MAX_PAGES`] 就跳过该字形并告警（宁缺字也不画错）。
 //!
+//! 光栅倍率由 [`FontAtlas::set_raster_scale`] 决定（见该方法的文档）：默认 1 = 每个
+//! 逻辑像素一份覆盖率；>1 时同一个字形按 `字号 × 倍率` 另落一份更细的位图，两套条目
+//! 在 `glyphs` 里天然共存（合成的键里 `font_size_bits` 不同）。
+//!
 //! 装箱与光栅全在 CPU 侧（`Vec<u8>` 影子页），GPU 只在 [`FontAtlas::sync`] 时碰一次：
 //! 所以 `glyph()` 三端（含 wasm）都能跑单测，而"页脏了才整页 `write_texture`"把上传
 //! 摊薄成每帧至多一次。页边长取 1024 = 4×256，正好满足 `COPY_BYTES_PER_ROW_ALIGNMENT`，
@@ -21,7 +25,7 @@
 
 use std::collections::HashMap;
 
-use cosmic_text::{CacheKey, FontSystem, SwashCache, SwashContent};
+use cosmic_text::{CacheKey, FontSystem, SubpixelBin, SwashCache, SwashContent};
 use etagere::{BucketedAtlasAllocator, size2};
 use sisf_render::Renderer;
 
@@ -29,13 +33,39 @@ use sisf_render::Renderer;
 pub const MASK_EPOCH: u64 = 1 << 61;
 
 /// 覆盖率页边长（像素）。必须是 256 的倍数：整页 `write_texture` 的 `bytes_per_row`。
-const PAGE_EDGE: u32 = 1024;
+pub(crate) const PAGE_EDGE: u32 = 1024;
 
 /// 覆盖率页上限（每页 CPU+GPU 各 1MB）。
+///
+/// 这是超采样档位的实际预算闸门：`raster_scale = 2` 让每个字形多吃 4 倍面积，
+/// `= 4` 吃 16 倍。档位由 [`raster_scale_for`] 从放大倍率取，页满时按既有约定
+/// 跳过新字形并告警（宁缺字不画错），所以这里宁小勿大——提高它前先确认字号档位。
 const MAX_PAGES: usize = 4;
 
 /// 字形四周的 0 覆盖 gutter 宽度（线性采样不外渗的保险）。
 const GUTTER: u32 = 1;
+
+/// 光栅超采样的最高档（2 的幂）。再高一级面积就是 4 倍，页先撑不住。
+pub const MAX_RASTER_SCALE: f32 = 4.0;
+
+/// 把"虚拟像素 → 物理像素"的有效放大倍率量化成光栅超采样档位。
+///
+/// 取 **向上取到的 2 的幂**（1/2/4，上限 [`MAX_RASTER_SCALE`]）：`Fit` 下 1.44× 放大
+/// 会把 1 像素宽的覆盖率位图摊成 1.44 像素的渐变（发虚），而 2 档的位图在同一投影下
+/// 是 1.39× 缩小采样 —— 边缘重新拿到真实细节。整数倍（`IntegerFit` 的 1×/2×）正好
+/// 落在档位上，所以像素风那条通路也不吃亏。
+///
+/// `scale ≤ 1`（窗口比虚拟分辨率还小）恒取 1：那时是缩小采样，多光栅的像素会被扔掉，
+/// 只白吃页容量。
+pub fn raster_scale_for(scale: f32) -> f32 {
+    if scale <= 1.0 {
+        1.0
+    } else if scale <= 2.0 {
+        2.0
+    } else {
+        MAX_RASTER_SCALE
+    }
+}
 
 /// 一个字形的落位：够填一个 `Instance` 的 uv/size，外加相对 pen 的偏移。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -45,10 +75,36 @@ pub struct GlyphRect {
     /// 归一化 uv 左下/右上（页尺寸是 `PAGE_EDGE`，不是字形尺寸）。
     pub uv0: [f32; 2],
     pub uv1: [f32; 2],
-    /// 覆盖率位图尺寸（像素）。
+    /// 覆盖率位图尺寸（**档内**像素）。
     pub size: [u32; 2],
-    /// 相对 pen 位置（`PhysicalGlyph.x/y`）的**左上角**偏移，y 已按"屏幕向下"翻好。
-    pub offset: [i32; 2],
+    /// 相对 pen 位置（`PhysicalGlyph.x/y`）的**左上角**偏移，y 已按"屏幕向下"翻好，
+    /// 单位是**逻辑像素**（= 位图像素 / `scale`）。
+    pub offset: [f32; 2],
+    /// 光栅超采样档位（[`FontAtlas::raster_scale`] 在该字形落位时的值）。
+    ///
+    /// 画 quad 前要用它把 `size` 折回逻辑像素：`w = size[0] as f32 / scale`。
+    /// 记在条目里而不是让绘制方去问图集，是为了让"换档"这件事不可能被某个调用点漏掉
+    /// ——图集里同时住着 1 档和 2 档的同一个字形。
+    pub scale: f32,
+}
+
+/// 逻辑键 → raster 键，顺带取出被归零的 bin 余量（见 [`FontAtlas::set_raster_scale`]）。
+///
+/// 只动 `font_size_bits` 与两个 bin，所以 `layout` 完全不用知道档位的存在：pen 位置
+/// 仍是逻辑像素整数，字形形状按 `字号 × 档位` 光栅。1 档原样返回，行为与加这个
+/// 参数之前逐字相同。
+fn synth_key(key: CacheKey, scale: f32) -> ([f32; 2], CacheKey) {
+    if scale <= 1.0 {
+        return ([0.0; 2], key);
+    }
+    let residue = [key.x_bin.as_float(), key.y_bin.as_float()];
+    let synth = CacheKey {
+        font_size_bits: (f32::from_bits(key.font_size_bits) * scale).to_bits(),
+        x_bin: SubpixelBin::Zero,
+        y_bin: SubpixelBin::Zero,
+        ..key
+    };
+    (residue, synth)
 }
 
 /// 一页覆盖率：CPU 影子 + 惰性建的 GPU 纹理。
@@ -109,6 +165,8 @@ pub struct FontAtlas {
     next_page: u64,
     warned_color: bool,
     warned_full: bool,
+    /// 落位新字形时使用的光栅超采样档位（[`Self::set_raster_scale`]）。
+    raster_scale: f32,
 }
 
 impl Default for FontAtlas {
@@ -126,7 +184,28 @@ impl FontAtlas {
             next_page: 0,
             warned_color: false,
             warned_full: false,
+            raster_scale: 1.0,
         }
+    }
+
+    /// 当前光栅超采样档位。
+    pub fn raster_scale(&self) -> f32 {
+        self.raster_scale
+    }
+
+    /// 设定**之后落位**的字形的超采样档位（已缓存的条目原样保留）。
+    ///
+    /// 只在窗口尺寸变化时调，不要每帧调：`raster_scale_for` 是向上取整的档位，
+    /// 拖窗口时倍率连续变化 ⇒ 每跨一档就多一套字形进页，档位不变就不重复装箱。
+    /// 已经画出去的 quad 里带着自己的 `scale`，所以换档不需要重排或失效任何东西。
+    pub fn set_raster_scale(&mut self, scale: f32) {
+        // NaN 单独回 1 档而不是 `clamp`（它把 NaN 原样返回）：档位是字号乘数，
+        // 带 NaN 去装箱等于毁掉整页覆盖率。±∞ 则让 `clamp` 夹到端点档，符合"往大了取"。
+        self.raster_scale = if scale.is_nan() {
+            1.0
+        } else {
+            scale.clamp(1.0, MAX_RASTER_SCALE)
+        };
     }
 
     /// 已用的覆盖率页数。
@@ -146,14 +225,20 @@ impl FontAtlas {
 
     /// 取一个字形的覆盖率矩形，必要时**只在 CPU 侧**光栅并装箱。
     ///
+    /// `key` 是 `layout` 给的**逻辑**键（字号 = 虚拟像素），档位由
+    /// [`Self::set_raster_scale`] 决定：查缓存前先合成成 raster 键，所以同一档只在
+    /// 第一次光栅，换档则各存一份。
+    ///
     /// 返回 `None` 表示这个字形没有可画面积（空格、零尺寸）或本页不支持其内容格式；
     /// 结论会进负缓存，所以每帧重复排版不会重复光栅。
     pub fn glyph(&mut self, fonts: &mut FontSystem, key: CacheKey) -> Option<GlyphRect> {
-        if let Some(hit) = self.glyphs.get(&key) {
+        let scale = self.raster_scale;
+        let (residue, raster) = synth_key(key, scale);
+        if let Some(hit) = self.glyphs.get(&raster) {
             return *hit;
         }
-        let placed = self.rasterize(fonts, key);
-        self.glyphs.insert(key, placed);
+        let placed = self.rasterize(fonts, raster, scale, residue);
+        self.glyphs.insert(raster, placed);
         placed
     }
 
@@ -196,7 +281,13 @@ impl FontAtlas {
         }
     }
 
-    fn rasterize(&mut self, fonts: &mut FontSystem, key: CacheKey) -> Option<GlyphRect> {
+    fn rasterize(
+        &mut self,
+        fonts: &mut FontSystem,
+        key: CacheKey,
+        scale: f32,
+        residue: [f32; 2],
+    ) -> Option<GlyphRect> {
         let img = self.swash.get_image_uncached(fonts, key)?;
         let (w, h) = (img.placement.width, img.placement.height);
         if w == 0 || h == 0 {
@@ -229,8 +320,13 @@ impl FontAtlas {
             uv0: [x as f32 / edge, y as f32 / edge],
             uv1: [(x + w) as f32 / edge, (y + h) as f32 / edge],
             size: [w, h],
-            // swash 的 `top` 是"基线以上为正"，屏幕 y 向下故取负。
-            offset: [img.placement.left, -img.placement.top],
+            // swash 的 `top` 是"基线以上为正"，屏幕 y 向下故取负。1 档时 placement 已经把
+            // bin 的亚像素余量算进去了（`residue` 为 0），>1 档才手工补回来。
+            offset: [
+                img.placement.left as f32 / scale + residue[0],
+                -img.placement.top as f32 / scale + residue[1],
+            ],
+            scale,
         })
     }
 
@@ -397,5 +493,122 @@ mod tests {
         assert!(atlas.glyph(bundle.fonts(), k).is_none());
         assert_eq!(atlas.cached(), 1, "第二次查的是负缓存");
         assert_eq!(atlas.page_count(), 0, "没落位就不该建页");
+    }
+
+    /// 档位表：向上取到 2 的幂，1× 与缩小采样都停在 1 档（多光栅的像素会被扔掉）。
+    #[test]
+    fn tiers_round_up_to_powers_of_two() {
+        assert_eq!(raster_scale_for(0.5), 1.0);
+        assert_eq!(raster_scale_for(1.0), 1.0, "IntegerFit 1× 就该 1:1");
+        assert_eq!(raster_scale_for(1.01), 2.0, "刚越过 1 倍就开始发虚");
+        assert_eq!(raster_scale_for(1.44), 2.0, "Fit 到 1080p 的典型倍率");
+        assert_eq!(raster_scale_for(2.0), 2.0, "IntegerFit 2× 也要 2 档才不糊");
+        assert_eq!(raster_scale_for(2.01), MAX_RASTER_SCALE);
+        assert_eq!(
+            raster_scale_for(9.0),
+            MAX_RASTER_SCALE,
+            "档位有上限，页容量先撑不住"
+        );
+    }
+
+    /// 档位 setter 自己就是最后一道闸：坏值不许进装箱（NaN 会把整页覆盖率算成 NaN）。
+    #[test]
+    fn a_nonsense_tier_falls_back_instead_of_poisoning_the_atlas() {
+        let mut atlas = FontAtlas::new();
+        atlas.set_raster_scale(f32::NAN);
+        assert_eq!(atlas.raster_scale(), 1.0, "NaN 不是档位，必须回 1 档");
+        for (weird, want) in [(0.0, 1.0), (-4.0, 1.0), (64.0, MAX_RASTER_SCALE)] {
+            atlas.set_raster_scale(weird);
+            assert_eq!(atlas.raster_scale(), want, "{weird} 该夹到端点档");
+        }
+        atlas.set_raster_scale(f32::INFINITY);
+        assert_eq!(atlas.raster_scale(), MAX_RASTER_SCALE, "无穷大 = 最大档");
+    }
+
+    /// 换档只改位图粗细，不改排版：逻辑宽高与相对 pen 的落点都不许动。
+    #[test]
+    fn supersampling_adds_detail_without_moving_the_glyph() {
+        let mut bundle = FontBundle::from_bytes(INTER);
+        let mut atlas = FontAtlas::new();
+        let k = keys(&mut bundle, "A", 24.0)[0];
+        let one = atlas.glyph(bundle.fonts(), k).expect("1 档有覆盖率");
+        assert_eq!(one.scale, 1.0, "默认档就是 1，与旧行为逐字相同");
+
+        atlas.set_raster_scale(2.0);
+        let two = atlas.glyph(bundle.fonts(), k).expect("2 档有覆盖率");
+        assert_eq!(two.scale, 2.0);
+        assert!(
+            (two.size[0] as i32 - one.size[0] as i32 * 2).abs() <= 2,
+            "2 档的位图宽度该翻倍: {:?} vs {:?}",
+            two.size,
+            one.size
+        );
+        // 逻辑度量不变 —— 这条才是"排版不用跟着改"的证据。
+        let logical = |r: &GlyphRect| [r.size[0] as f32 / r.scale, r.size[1] as f32 / r.scale];
+        let (a, b) = (logical(&one), logical(&two));
+        for axis in 0..2 {
+            assert!(
+                (a[axis] - b[axis]).abs() <= 1.0,
+                "第 {axis} 轴的逻辑尺寸被换档改了: {a:?} vs {b:?}"
+            );
+            assert!(
+                (one.offset[axis] - two.offset[axis]).abs() <= 1.0,
+                "第 {axis} 轴的落点被换档改了: {:?} vs {:?}",
+                one.offset,
+                two.offset
+            );
+        }
+        // 两套条目在缓存里共存（合成键的字号位不同），回手查 1 档拿到的还是原矩形。
+        assert_eq!(atlas.cached(), 2, "换档不该顶掉旧条目");
+        atlas.set_raster_scale(1.0);
+        assert_eq!(atlas.glyph(bundle.fonts(), k), Some(one));
+    }
+
+    /// 亚像素余量在高档位上落到 quad 位置，而不是被 bin 归零顺手丢掉。
+    ///
+    /// 一整个词、三档一起过：`layout` 把每字 pen 取整（`x_bin` 就是被舍掉那点推进），
+    /// 高档位归零 bin 之后，各字之间的**相对**排布必须仍与 1 档一致（差在一像素内）。
+    #[test]
+    fn every_tier_keeps_the_same_relative_layout() {
+        let mut bundle = FontBundle::from_bytes(INTER);
+        let mut atlas = FontAtlas::new();
+        let keys = keys(&mut bundle, "raster 引擎", 24.0);
+        let mut per_tier = Vec::new();
+        for tier in [1.0, 2.0, MAX_RASTER_SCALE] {
+            atlas.set_raster_scale(tier);
+            let rects: Vec<GlyphRect> = keys
+                .iter()
+                .filter_map(|k| atlas.glyph(bundle.fonts(), *k))
+                .collect();
+            assert!(rects.len() >= 6, "'raster 引擎' 光栅出的字形太少");
+            for r in &rects {
+                assert_eq!(r.scale, tier);
+            }
+            per_tier.push(rects);
+        }
+        let left = |r: &GlyphRect| r.offset[0];
+        for (tier, rects) in [2.0, MAX_RASTER_SCALE].iter().zip(&per_tier[1..]) {
+            for (a, b) in per_tier[0].iter().zip(rects) {
+                assert!(
+                    (left(a) - left(b)).abs() <= 1.0,
+                    "{tier} 档把字形横向挪位了: {} vs {}",
+                    left(a),
+                    left(b)
+                );
+                assert!(
+                    (a.offset[1] - b.offset[1]).abs() <= 1.0,
+                    "{tier} 档把字形纵向挪位了: {} vs {}",
+                    a.offset[1],
+                    b.offset[1]
+                );
+            }
+        }
+        // 每档各一套条目，谁也不顶掉谁（合成键里的字号位不同）。
+        assert!(
+            atlas.cached() > per_tier[0].len(),
+            "三档跑完缓存只装得下一档？cached={} / 一档 {} 个字形",
+            atlas.cached(),
+            per_tier[0].len()
+        );
     }
 }

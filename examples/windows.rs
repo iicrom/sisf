@@ -416,10 +416,18 @@ impl App for WindowDemo {
     fn tick(&mut self, dt: Duration, ctx: &mut FrameCtx) {
         self.t += dt.as_secs_f32();
         self.frames += 1;
+        // 文字光栅档位跟着 viewport 倍率取（T8 收掉的那条 T6 遗留缺陷）：非整数倍放大
+        // 时靠它把覆盖率位图细化一档，而不是拉伸 1 虚拟像素的纹素。重复赋同值是 no-op，
+        // 只有跨档才多花页容量。
+        self.text.set_raster_scale(ctx.raster_scale());
         if self.frames == 1 {
             platform::log_info(&format!(
-                "[windows] 启动 {}x{} 物理 {:?} scale {:.2}",
-                VIRTUAL.0, VIRTUAL.1, ctx.physical_size, ctx.scale
+                "[windows] 启动 {}x{} 物理 {:?} scale {:.2} 文字档位 {:.0}x",
+                VIRTUAL.0,
+                VIRTUAL.1,
+                ctx.physical_size,
+                ctx.scale,
+                self.text.raster_scale()
             ));
         }
     }

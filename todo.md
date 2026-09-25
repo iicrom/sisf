@@ -278,14 +278,65 @@
 
 
 ## T8 动画 + MoveRoute + 固定 tick
-- [ ] `sisf-sprite/src/anim.rs`：`AnimDef{ frames:[FrameDef{rect,dur_ms}], loop_: Once|Pingpong|Loop{n}, pattern: Option<DirPattern> }`、`AnimState{def,speed,index,paused}`、`DirPattern::RpgMaker4x3`（MV，`dir + 3*step`）/ `RpgMaker2x2`（VX/Ace）。验收：两图样帧索引单测（下/左/右/上四向）。
-- [ ] 步帧由移动驱动（RPG Maker 语义）：`set_step(u8)`，静止时不推进帧。验收：单测静止不换帧。
-- [ ] `sisf-app/src/timing.rs`：固定 tick + 累加器（补帧上限 5）+ `draw(alpha)` 插值；`Suspended` 冻结累加器。验收：dt 尖峰与补帧上限单测。
-- [ ] `sisf-sprite/src/task.rs`：`schedule/tick` 任务调度器，承载 `Tween<T>` 关键帧与 MoveRoute。验收：Tween 完成回调按 tick 计数。
-- [ ] `MoveRoute{ nodes:[RouteNode], speed, through }`：`Wait/Turn/Move(dir,n)/MoveTo/Jump/FacingLock`，网格（RPG）与自由（SLG）双模式。验收：逐格移动 + `wait:true` 存活至完成。
-- [ ] 虚拟分辨率映射：`Fit|Fill|IntegerFit` + letterbox，指针/触摸坐标自动映射虚拟空间。验收：整数缩放无半像素抖动、点击命中正确。**接 T6 遗留**：文字覆盖率按逻辑像素光栅、放大倍率非整数时会发虚（`docs/text.md`「已知缺陷」），本条要一并给出光栅超采样档（`raster_scale`）或全分辨率文字层，二选一并写进文档。
-- [ ] `examples/tiled_map.rs`：三层 tilemap（地面/事件/上方，图块 32/48）+ 键盘 4 向行走 + 事件格碰撞。验收：桌面 IntegerFit 544×416 + wasm 手测。
-- 验收（整段）：anim/route/timing 单测 + tiled_map → 提交 `P7 anim+route+tick`。
+- [x] `sisf-sprite/src/anim.rs`：`AnimDef{ frames:[FrameDef{rect,dur_ms}], loop_: Once|Pingpong|Loop{n}, pattern: Option<DirPattern> }`、`AnimState{def,speed,index,paused}`、`DirPattern::RpgMaker4x3`（MV，`dir + 3*step`）/ `RpgMaker2x2`（VX/Ace）。验收：两图样帧索引单测（下/左/右/上四向）。→ `anim::tests` **14 项**：`mv_4x3_indexes_every_direction_by_step` 与 `ace_2x2_folds_the_third_step_into_the_first_column`（就是验收点名的"两图样四向帧索引"）、`both_patterns_agree_on_direction_rows`（两图样的 下/左/右/上 行号逐条相同，只差列数 3 vs 2）、`turning_and_stepping_compose_into_the_expected_cell`、`grid_frames_read_row_major`、`short_frame_tables_clamp_instead_of_running_off_the_sheet`（帧表短于图样时夹住，不 panic）。清单字面的 `dir + 3*step` 是列优先读法，本仓库统一行优先 `dir_row*cols + step%cols`（见下第 5 条）。
+- [x] 步帧由移动驱动（RPG Maker 语义）：`set_step(u8)`，静止时不推进帧。验收：单测静止不换帧。→ `movement_driven_frames_never_advance_on_their_own`：`pattern: Some(..)` 时 `tick(500ms)` 之后 `rect()` 与 `index` 一动不动，只有 `set_step(1)` 才换列（`arena_tick_applies_frames_only_to_sprites_that_changed` 同向钉住 `tick_anims` 只碰 `pattern: None`）。时间驱动那一侧由 `time_driven_anim_advances_and_stops_at_the_end` / `loop_counts_cycles_and_zero_means_forever` / `pingpong_bounces_without_repeating_the_ends` / `speed_and_pause_drive_the_clock` 覆盖。
+- [x] `sisf-app/src/timing.rs`：固定 tick + 累加器（补帧上限 5）+ `draw(alpha)` 插值；`Suspended` 冻结累加器。验收：dt 尖峰与补帧上限单测。→ `timing::tests` **6 项**：`a_huge_spike_is_capped_and_its_debt_is_dropped`（1s 只补 `MAX_CATCHUP=5` 拍，其余进 `dropped`，不拖死下一帧）、`a_frame_shorter_than_a_period_produces_no_tick`、`alpha_is_the_leftover_of_the_accumulator`（16ms@60Hz ⇒ alpha≈0.96）、`steady_frame_rates_are_all_one_tick_per_frame_or_none`（30/60/120Hz 下游戏速度一致）、`reset_freezes_the_accumulator_for_a_resume`、`bad_config_degrades_instead_of_stalling_the_loop`。接线在 `runner.rs`：`RedrawRequested → clock.step(dt) → 0..=5 次 App::tick(周期) → App::draw(alpha)`，挂起那一支同时 `last=None` + `clock.reset()`。
+- [x] `sisf-sprite/src/task.rs`：`schedule/tick` 任务调度器，承载 `Tween<T>` 关键帧与 MoveRoute。验收：Tween 完成回调按 tick 计数。→ `task::tests` **15 项**：`tween_completion_is_counted_in_ticks`（回调落在第 N 拍，与墙钟无关）、`tween_interpolates_its_keys_and_eases_each_segment`、`easing_curves_stay_inside_their_interval`、`a_single_key_tween_lands_once_and_finishes`、`a_task_on_a_despawned_sprite_ends_itself`、`cancel_drops_only_that_sprites_tasks`。示例里 `open_chest` 用 5 关键帧闪烁（按拍），完成回调换图块 + 把该格转可走。
+- [x] `MoveRoute{ nodes:[RouteNode], speed, through }`：`Wait/Turn/Move(dir,n)/MoveTo/Jump/FacingLock`，网格（RPG）与自由（SLG）双模式。验收：逐格移动 + `wait:true` 存活至完成。→ `move_route_walks_cell_by_cell`（`TILE/speed` 拍一格，逐格 committed）、`a_waiting_route_keeps_the_sprite_queue_alive` vs `a_non_waiting_route_runs_alongside_its_sibling`（队列语义正反两面）、`walls_void_the_rest_of_a_node_but_not_the_route`、`grid_move_to_hops_axis_by_axis_until_it_arrives`、`free_mode_goes_straight_and_snaps_to_the_goal`、`a_jump_clears_a_gap_without_stepping`、`facing_lock_moves_without_turning_the_graphic`、`turn_and_wait_cost_one_tick_each`。
+- [x] 虚拟分辨率映射：`Fit|Fill|IntegerFit` + letterbox，指针/触摸坐标自动映射虚拟空间。验收：整数缩放无半像素抖动、点击命中正确。**接 T6 遗留**：文字覆盖率按逻辑像素光栅、放大倍率非整数时会发虚（`docs/text.md`「已知缺陷」），本条要一并给出光栅超采样档（`raster_scale`）或全分辨率文字层，二选一并写进文档。→ `frame::tests` **9 项**：`integer_fit_with_odd_padding_stays_on_the_pixel_grid`（1001×701 装 544×416：未取整的原点是 (228.5,142.5) ⇒ 每像素采样在两个纹素正中，现在钉成整数格线）、`pointer_hits_the_expected_cell_after_the_letterbox`（三种缩放下中心与右下角都自洽，映射与投影同一个 `Viewport` 出处）、`text_raster_tier_follows_the_upscale`（1:1→1 档、2×→2 档、缩小→1 档、3×→4 档）。**二选一选的是光栅档位**（不做全分辨率文字层，理由与代价写在 `docs/text.md`「文字光栅超采样」：页容量按档位平方涨，档位有 `MAX_RASTER_SCALE` 上限）；`atlas::tests` 补 `supersampling_adds_detail_without_moving_the_glyph`（换档只改粗细，逻辑宽高与落点不动）与 `a_nonsense_tier_falls_back_instead_of_poisoning_the_atlas`（NaN 回 1 档，见下第 7 条）。
+- [x] `examples/tiled_map.rs`：三层 tilemap（地面/事件/上方，图块 32/48）+ 键盘 4 向行走 + 事件格碰撞。验收：桌面 IntegerFit 544×416 + wasm 手测。→ 示例注册 `required-features=["image"]` + `test=true`，`cargo test -p sisf --all-features --example tiled_map` **10 绿**（地图形状/边框封死、格点阵往返、相机居中后夹边、三层 z 序 ground<decal<y-sort<above、`MoveRoute` 撞在真实通行表上、位图区域不越界、预乘 alpha + 空边距、按键 held 语义、HUD 层净投影、四向键）。美术整张程序生成（256×288 单页 ⇒ 单 epoch ⇒ y 排序有全序权），不新增素材/依赖。桌面 IntegerFit 实测（`cargo run --release -p sisf --features image --example tiled_map`，日志 + 抓屏像素扫描）：
+  - `物理 800x600 ⇒ 画面 (128,92) 544x416，倍率 1.00，光栅档 1` / `物理 1185x862 ⇒ 画面 (48,15) 1088x832，倍率 2.00，光栅档 2`；`第 1 帧合成: batches 4 quads 728 sprites 637 pages 1 tier 1x`（三层 + HUD 合成 4 批）。
+  - 键盘链路由 `PostMessageW` 打方向键走真窗口：`角色到格 13,8（相机 174,56）` → `16,12` → 北向 `16,8…13,4`，相机跟着挪并在北边/西边夹住（`cam 224,184`→`224,70`→`160,0`）；`Enter` 打出 `宝箱打开，该格转为可走`，随后同一格走得过去（碰撞表被事件改掉）。
+  - 边条不渗色（像素级）：修前 800×600 的 y=300 一行在 client x∈[0,127] 上是石墙/草地色；修后同一行 client x=0..127 恒为清屏色 `rgb(10,15,23)`、x=136（= 画面左沿）起才有内容；2× 下图区左沿正好落在 client x=48；顶条整行（client 0..1184）零跳变。HUD 可读性：1× 的 HUD 带内 ≥200 亮度像素 1417 个（同图地图区只有 56 个 = 灯火），2× 带内 6148 个，裁剪 1:1 读数 `tick 25472 a0.92 cell 13,4 cam 160,0` / `opened the chest`。⚠️ **wasm 手测待用户开页面**（`cargo xtask web tiled_map` 已把 pkg 生成到 `web/pkg/tiled_map.js`，:8080 上的静态服务直接可访问 `http://127.0.0.1:8080/?ex=tiled_map&wgl`；日志通道 = `platform::log_info` 进 console）。
+- 验收（整段）：anim/route/timing 单测 + tiled_map → 提交 `P7 anim+route+tick`。→ 落地说明见 `docs/sprite.md`「T8：固定拍上的动画与任务」（两条互斥动画通路的分工表、任务三约定、`dir()/step()` 是动画状态）+ `docs/platforms.md`（letterbox 只管投影不管裁剪、HUD 必须挂更高 viewport 层）+ `docs/text.md`（文字层号：`draw_text_at`）。闸门（都用原命令）：`cargo xtask fmt --check` 净、`cargo xtask clippy`（win `--all-targets -D warnings` + wasm32 web）0 warning、`cargo xtask check-all` 四组 0 warning、`cargo test --workspace --all-features` 全绿 0 红、`cargo xtask golden` 全绿（文字基线不受新参数影响）。
+
+### T8 期间发现并修正的事实（供后续阶段引用）
+
+1. **`BatchKey` 先按 `layer` 排、`z` 只在同批内有决定权 ⇒ 相机层之上的 HUD 没法靠大 `z` 盖住
+   地图**。第一版 tiled_map 把 HUD 底板与三行文字挂在 layer 0、地图挂在相机层（layer 1），
+   抓屏里 HUD 一个像素都不出现（不是画错，是整层被压在下面）。修法：`push_camera` 往栈上推
+   **两层** —— layer 1 = `Viewport::at(-cam.x,-cam.y,vw,vh)`（世界），layer 2 =
+   `Viewport::at(+cam.x,+cam.y,vw,vh)`（HUD，净投影正好回到 letterbox 里的虚拟画面，既不跟着滚
+   又压得住地图）。单测 `the_hud_layer_nets_out_the_camera_and_outranks_the_world` 钉住两层的投影
+   与"pop/push 成对 ⇒ 栈深恒 3"。
+2. **letterbox 只保证投影，不保证裁剪**。`Viewport` 把画面放进边条内的矩形，但 scissor 仍然是整个
+   surface ⇒ 相机层自己平移出去的那部分内容照原样画进黑边（800×600/1× 下地图西侧石墙正好落在
+   128px 边条上，像素扫描看得见）。**谁推 viewport 层谁就得自己 `push_clip`**，这条写进
+   `docs/platforms.md`，T10 的消息窗/小地图同样受约束。
+3. **裁剪盒用的是那一层自己的坐标，相机层的"画面左上角"不是 `(0,0)`**。第 2 条的第一版修法是
+   `push_clip(1, [0,0,vw,vh])` —— 仍然渗色，因为 layer 1 的 `(0,0)` 已经在画面左上角往回 `-cam`
+   的位置上；正确的是 `[cam.x, cam.y, vw, vh]`。`push_viewport` 的 `rect.w/h` 只用于平移（不参与
+   派生投影），所以"层尺寸"和"该层可见盒"是两件事，别混。
+4. **文字要能落在指定 viewport 层**。`TextEngine::draw_text` 原先把 `layer` 写死 0（与 RGSS 的
+   "画进当前目标"对齐），于是第 1 条那个 HUD 层根本挂不上去。新增 `draw_text_at(.., layer)` /
+   `text_quads(.., layer)`，层号**同时**写进 `BatchKey::layer`（排序读它）与 `Instance::layer`
+   （着色器读它），只改一个就是"字被投到 A 层、却按 B 层合批"的错位；
+   `text_quads_carry_the_layer_into_key_and_instance` 钉住两者一致。
+5. **`RpgMaker4x3` 是 4 行 × 3 列，不是 4 列**。清单字面的 `dir + 3*step` 是列优先读法；本仓库帧表
+   按行优先装箱（与 `AnimDef::grid` 同一约定），故 `index = dir_row(dir)*cols + step%cols`，
+   `cols` = 3（MV）或 2（VX/Ace）。示例里按 4 列写 `draw_body` 直接算越界（减法还 panic 过一次）。
+6. **`Sprite::dir()` / `step()` 是动画状态，不是普通字段**：精灵没挂 `AnimDef` 时 `Turn` 节点与
+   `set_dir` 都是 no-op（没有图样就不知道"朝上"取哪块 `src`）。断言 `Turn` 生效的单测必须先给一条
+   `AnimDef::grid_pattern(..)` —— 第一版断完拿到 `None` 才看清这条。
+7. **`raster_scale` 档位是字号乘数，NaN 不能靠 `clamp` 兜**：`f32::clamp` 原样返回 NaN，带着 NaN 去
+   装箱等于毁掉整页覆盖率 ⇒ `FontAtlas::set_raster_scale` 单独把 NaN 打回 1 档，`±∞` 才让 `clamp`
+   夹到端点档。
+8. **viewport 层的投影在 resize 后自动重推，但 `push` 必须发生在 `frame_u` 之前**。`Runner` 的帧序是
+   `tick* → frame.frame_u() → draw`，而 `FrameCtx::recompute` 只按存的 `rect` 重新派生 `1..depth`
+   的投影 ⇒ 相机层在 `tick` 里推一次就够，resize 不需要手动重建；反过来在 `draw` 里推层会晚于本帧的
+   `frame_u`（下一帧才被读到）。
+9. **整数 2× 放大下 `Linear` 采样不等于像素翻倍**：物理像素中心落在纹素内部的 0.25/0.75 处，相邻纹素
+   按 25/75 混合（实测同一逻辑像素的两列差 `rgb` 1~4）。像素风要真翻倍得 `Bitmap::filter = Nearest`
+   那条双 sampler（`docs/sprite.md` 已记为 T10 决策），本阶段不动 —— 但别把"整数倍缩放"当成"自动
+   像素翻倍"来宣传，它保证的是**格线同相**（不抖、不整体发糊）。
+10. **`DrawStats` 没有 `Default`，且 `Renderer::stats()` 读的是上一次 `end_frame` 的账**：示例里存
+    `Option<DrawStats>` + `map_or`；合成读数要到第 2 帧才打印得出第 1 帧的结果（`if self.frame == 2`）。
+11. **Windows 无人值守取证的三条工具性事实**：HWND 用 `Get-Process | ? MainWindowTitle -like` 拿
+    （`FindWindowW` 经 PowerShell `Add-Type` 走 ANSI marshalling，返回 0）；`SetWindowPos` 的 `0x1`
+    是 `SWP_NOSIZE`（改尺寸要 `NOZORDER|NOACTIVATE = 0x14`）；`PostMessageW WM_KEYDOWN/WM_KEYUP` 配
+    `MapVirtualKeyW` 的 scan code（方向键再加扩展位 `0x1000000`）能驱动 winit 输入 ⇒ 键盘链路可在
+    没有人点击窗口的情况下取证。另外 Git Bash 的 `kill $PID` 杀不掉 Windows 进程，残留示例会锁住
+    `target/.../<example>.exe` 报 `LNK1104`，要用 `Get-Process <name> | Stop-Process -Force`。
 
 ## T9 引擎事件总线 + 输入映射
 - [ ] `sisf-event/src/bus.rs`：`EngineEvent{Action,Key{code,kind,ch},Pointer{kind,pos,button,delta},Lifecycle,Custom(u32,serde_json::Value)}` + `EngineBus{push,drain}`。验收：drain 顺序单测。

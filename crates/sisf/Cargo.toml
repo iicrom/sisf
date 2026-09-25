@@ -62,3 +62,12 @@ path = "../../examples/audio_demo.rs"
 # 三条解码链齐了才编：示例要把 fixture 一次性解码成驻留样本（见文件头的"解码一次"），
 # 少了任何一条那份 fixture 就解不出来。`cargo check --all-targets` 会自动跳过它。
 required-features = ["ogg", "mp3", "wav"]
+
+# 三层 tilemap + 键盘 4 向行走 + 网格碰撞（T8e）。`image` 只因为示例用 `Atlas/UploadRing`
+# 把程序生成的位图送进 GPU —— 不涉及任何解码，故不需要 ogg/mp3/wav 那类能力。
+# `test = true`：验收跑的是**示例自带**的单测（地图形状、三层的 z 序、碰撞表上的 MoveRoute）。
+[[example]]
+name = "tiled_map"
+path = "../../examples/tiled_map.rs"
+test = true
+required-features = ["image"]

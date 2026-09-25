@@ -53,6 +53,18 @@ impl TextEngine {
         &self.atlas
     }
 
+    /// 文字光栅超采样档位（见 [`FontAtlas::set_raster_scale`]）。
+    pub fn raster_scale(&self) -> f32 {
+        self.atlas.raster_scale()
+    }
+
+    /// 换档：窗口尺寸/`scale_factor` 变化时调一次，值取
+    /// [`crate::atlas::raster_scale_for`] 作用在"虚拟 → 物理"的有效放大倍率上
+    /// （`FrameCtx::raster_scale`）。
+    pub fn set_raster_scale(&mut self, scale: f32) {
+        self.atlas.set_raster_scale(scale);
+    }
+
     /// 排版（纯 CPU；结果与设备无关，所以每帧重排也不是错事）。
     pub fn layout(&mut self, text: &str, style: &TextStyle) -> TextRun {
         layout_with(self.bundle.fonts(), text, style)
@@ -93,25 +105,26 @@ impl TextEngine {
         Self::push_quads(renderer, quads)
     }
 
-    /// 按 `rect` 盒排版 + 对齐落成实例。换行与否原样听 `style.wrap_width` 的
-    /// （RGSS 的 `draw_text` 不换行；消息窗要折行就 `TextStyle::with_wrap`）。
+    /// 按 `rect` 盒排版 + 对齐落成实例，落进 viewport 栈的 `layer` 层。换行与否原样听
+    /// `style.wrap_width` 的（RGSS 的 `draw_text` 不换行；消息窗要折行就 `TextStyle::with_wrap`）。
     pub fn text_quads(
         &mut self,
         rect: [f32; 4],
         text: &str,
         style: &TextStyle,
         color: Rgba,
+        layer: u8,
     ) -> Vec<(BatchKey, Instance)> {
         let run = self.layout(text, style);
         let align = style.align;
         let dy = (rect[3] - run.height) * 0.5;
         let offsets = |i: usize| [rect[0] + run.align_offset(i, rect[2], align), rect[1] + dy];
-        self.quads(&run, &offsets, color, 0, 0)
+        self.quads(&run, &offsets, color, layer, 0)
     }
 
     /// RGSS 的 `Bitmap#draw_text(rect, text, align)`。
     ///
-    /// 在绘制会话里调用即画进那张位图，会话外画进当前帧目标。
+    /// 在绘制会话里调用即画进那张位图，会话外画进当前帧目标的 layer 0。
     pub fn draw_text(
         &mut self,
         renderer: &mut Renderer,
@@ -120,7 +133,23 @@ impl TextEngine {
         style: &TextStyle,
         color: Rgba,
     ) -> u32 {
-        let quads = self.text_quads(rect, text, style, color);
+        self.draw_text_at(renderer, rect, text, style, color, 0)
+    }
+
+    /// `draw_text` 的层显式版：文字要挂在 viewport 栈深处时用。
+    ///
+    /// 批的排序是 `(layer, epoch, blend, z, ...)` —— 层号压在 z 之前，所以"相机层之上的
+    /// HUD"没法用一个大 z 从 layer 0 盖上来，只能把字形本身投到那一层去。
+    pub fn draw_text_at(
+        &mut self,
+        renderer: &mut Renderer,
+        rect: [f32; 4],
+        text: &str,
+        style: &TextStyle,
+        color: Rgba,
+        layer: u8,
+    ) -> u32 {
+        let quads = self.text_quads(rect, text, style, color, layer);
         Self::push_quads(renderer, quads)
     }
 
@@ -173,6 +202,9 @@ fn batch_key(rect: &GlyphRect, layer: u8, z: i32) -> BatchKey {
 }
 
 /// 覆盖率矩形 + pen → 实例：左上角 = `at + pen + offset`，`Instance::pos` 是中心。
+///
+/// `rect.size` 是**档内**像素（超采样时比逻辑像素细），除以 `rect.scale` 才回到虚拟
+/// 分辨率的度量；`rect.offset` 已经是逻辑像素，见 [`crate::atlas::FontAtlas::set_raster_scale`]。
 fn instance(
     rect: &GlyphRect,
     glyph: &PlacedGlyph,
@@ -180,9 +212,12 @@ fn instance(
     color: Rgba,
     layer: u8,
 ) -> Instance {
-    let (w, h) = (rect.size[0] as f32, rect.size[1] as f32);
-    let left = at[0] + glyph.x as f32 + rect.offset[0] as f32;
-    let top = at[1] + glyph.y as f32 + rect.offset[1] as f32;
+    let (w, h) = (
+        rect.size[0] as f32 / rect.scale,
+        rect.size[1] as f32 / rect.scale,
+    );
+    let left = at[0] + glyph.x as f32 + rect.offset[0];
+    let top = at[1] + glyph.y as f32 + rect.offset[1];
     Instance {
         pos: [left + w / 2.0, top + h / 2.0],
         size: [w, h],
@@ -223,7 +258,7 @@ mod tests {
 
     /// 画一次并返回首字左上角（对齐/居中那几条断言只关心这个点）。
     fn head(e: &mut TextEngine, rect: [f32; 4], text: &str, style: TextStyle) -> [f32; 2] {
-        let quads = e.text_quads(rect, text, &style, [1.0; 4]);
+        let quads = e.text_quads(rect, text, &style, [1.0; 4], 0);
         assert!(!quads.is_empty(), "{text:?} 一个字形都没画出来");
         top_left(&quads[0].1)
     }
@@ -326,7 +361,7 @@ mod tests {
         let mut e = engine();
         let style = TextStyle::new(16.0).with_wrap(60.0);
         let text = "引擎渲染器测试";
-        let quads = e.text_quads([0.0, 0.0, 60.0, 200.0], text, &style, [1.0; 4]);
+        let quads = e.text_quads([0.0, 0.0, 60.0, 200.0], text, &style, [1.0; 4], 0);
         let lines = e.layout(text, &style);
         assert!(!quads.is_empty());
         assert!(
@@ -371,12 +406,78 @@ mod tests {
         assert_eq!(quads[0].0.epoch, quads[1].0.epoch, "两个字同一页");
     }
 
+    /// 超采样只换覆盖率粗细，不许动 quad：尺寸与落点仍是逻辑像素那一套。
+    #[test]
+    fn supersampling_changes_coverage_detail_not_the_quads() {
+        use crate::atlas::{PAGE_EDGE, raster_scale_for};
+
+        let mut e = engine();
+        let run = e.layout("引擎 Ag", &TextStyle::new(20.0));
+        let one = e.run_quads(&run, [30.0, 40.0], [1.0; 4], 0, 0);
+        let tier = raster_scale_for(1.44); // Fit 到 1080p 的典型倍率
+        assert_eq!(tier, 2.0);
+        e.set_raster_scale(tier);
+        let two = e.run_quads(&run, [30.0, 40.0], [1.0; 4], 0, 0);
+        assert_eq!(one.len(), two.len(), "同一个 run 的字形数不该因档位而变");
+        assert!(
+            one.len() >= 2,
+            "连拉丁都没光栅出来，测不到东西: {}",
+            one.len()
+        );
+        for ((_, a), (_, b)) in one.iter().zip(&two) {
+            for axis in 0..2 {
+                assert!(
+                    (a.size[axis] - b.size[axis]).abs() <= 1.0,
+                    "quad 尺寸被换档改了: {:?} vs {:?}",
+                    a.size,
+                    b.size
+                );
+                assert!(
+                    (a.pos[axis] - b.pos[axis]).abs() <= 1.0,
+                    "quad 落点被换档改了: {:?} vs {:?}",
+                    a.pos,
+                    b.pos
+                );
+            }
+            // uv 跨度 × 页边长 = 位图像素：这一档确实多光栅了一倍。
+            let px = |i: &Instance| (i.uv1[0] - i.uv0[0]) * PAGE_EDGE as f32;
+            assert!(
+                px(b) > px(a) * 1.5,
+                "2 档的位图没变细: {} vs {}",
+                px(a),
+                px(b)
+            );
+        }
+    }
+
+    /// 层号要同时进键和实例：排序读键，着色器读实例，两者不一致就会出现"字被投到 A 层、
+    /// 却按 B 层合批"的错位。
+    #[test]
+    fn text_quads_carry_the_layer_into_key_and_instance() {
+        let mut e = engine();
+        let style = TextStyle::new(16.0);
+        for layer in [0u8, 2, 7] {
+            let quads = e.text_quads([0.0, 0.0, 200.0, 20.0], "abc", &style, [1.0; 4], layer);
+            assert!(!quads.is_empty(), "{layer} 层没画出字形");
+            for (key, inst) in &quads {
+                assert_eq!(key.layer, layer);
+                assert_eq!(inst.layer, f32::from(layer));
+            }
+        }
+    }
+
     #[test]
     fn empty_text_draws_nothing() {
         let mut e = engine();
         assert!(
-            e.text_quads([0.0, 0.0, 32.0, 32.0], "", &TextStyle::new(16.0), [1.0; 4])
-                .is_empty()
+            e.text_quads(
+                [0.0, 0.0, 32.0, 32.0],
+                "",
+                &TextStyle::new(16.0),
+                [1.0; 4],
+                0
+            )
+            .is_empty()
         );
         assert!(e.atlas().page_count() <= 1, "没字就不该铺页");
     }

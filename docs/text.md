@@ -17,7 +17,7 @@ clip 栈────────────────────────
 | `FontBundle` | `bundle.rs` | ❌ | 字体字节 → `cosmic_text::FontSystem`；自带字体优先，缺失回退系统默认并 warn 一次 |
 | `layout` | `layout.rs` | ❌ | shaping/换行/bidi → `TextRun`（整数像素 pen + 字形代号） |
 | `FontAtlas` | `atlas.rs` | ✅（只在 `sync`） | `CacheKey → R8Unorm 覆盖率子矩形`，etagere 装箱，页自管 |
-| `TextEngine` | `draw.rs` | ✅（只在 `sync`） | 上面三者的门面：`layout` / `text_quads` / `draw_text` / `draw_run` / `sync` |
+| `TextEngine` | `draw.rs` | ✅（只在 `sync`） | 上面三者的门面：`layout` / `text_quads` / `draw_text` / `draw_text_at` / `draw_run` / `sync` |
 
 前两层纯 CPU，所以中英混排、换行、字号单调性这些断言在 wasm 下也能跑单测；只有覆盖率页
 的纹理是 GPU 的。
@@ -107,17 +107,22 @@ RT 句柄掉在 `new()` 里而直接 panic `Unregistered`。
 - 嵌套靠求交，交空得到空矩形 ⇒ 记录时直接跳过 draw，不下发 0 宽 scissor。
 - `pop_clip` 栈空时 no-op。`clip_depth()`/`clip_ids_used()` 报的都是**当前落位目标**的栈。
 - `draw_text` 本身**不裁剪**（RGSS 的文字本来就允许溢出 `rect`）：要裁就外面套 `push_clip`。
+- 层号：`draw_text` 恒落在 viewport 栈的 layer 0（与 RGSS 的"画进当前目标"对齐）。要把文字压在
+  相机层之上得显式换层 —— `draw_text_at(.., layer)` / `text_quads(.., layer)` / `draw_run(.., layer, z)`，
+  层号同时写进 `BatchKey::layer` 与 `Instance::layer`（排序读前者，着色器读后者，不一致就错位）。
+  为什么不能靠大 `z`：批的排序先看 `layer`，layer 0 的字盖不住 layer 1 的地图（T8e 实测缺陷）。
 
-## 已知缺陷：非整数放大倍率下文字发虚（挂 T8）
+## 文字光栅超采样（T8 修掉的「非整数倍率下发虚」）
 
-复现：`cargo run --release -p sisf --example windows`，默认窗口尺寸下第一帧日志是
-`[windows] 启动 320x240 物理 (800, 600) scale 2.50` —— 12/16px 的字明显软。
+原为 T6 遗留缺陷。复现：`cargo run --release -p sisf --example windows`，默认窗口尺寸下
+第一帧日志是 `[windows] 启动 320x240 物理 (800, 600) scale 2.50 文字档位 4x` —— 修之前
+12/16px 的字明显软。
 
 成因链是**分辨率**问题，不是通路问题：
 
-1. 覆盖率按逻辑尺寸光栅。`layout` 用 `Metrics::new(style.size, line_height)`，
+1. 覆盖率原本按逻辑尺寸光栅。`layout` 用 `Metrics::new(style.size, line_height)`，
    `FontAtlas::rasterize` 直接拿这个 `CacheKey` 问 swash 要位图，落位时
-   `quad.size = 位图 px 尺寸`（`draw.rs:183`）⇒ **1 个覆盖率纹素 = 1 个虚拟像素**，没有超采样档。
+   `quad.size = 位图 px 尺寸` ⇒ **1 个覆盖率纹素 = 1 个虚拟像素**，没有超采样档。
 2. layer 0 把虚拟映射进 letterbox。`FrameCtx::recompute` 的 `Fit` 分支算出 `scale = sx.min(sy)`，
    `ortho_viewport` 按 `[w/vw, h/vh]` 放大 ⇒ 这一帧所有纹素都被 `Linear` 采样器拉伸 2.5 倍。
    16 级纵向覆盖细节摊到 40 个物理像素上，就是"糊"。
@@ -129,15 +134,50 @@ RT 句柄掉在 `new()` 里而直接 panic `Unregistered`。
 背景那种整帧拉伸正依赖它。golden 也不覆盖这个场景 —— `text_scene.png` 是 544×416 离屏、
 scale 恰好 1，基线里的字本来就是清晰的。
 
-两条候选修法（都归 **T8「虚拟分辨率映射」**那条，因为它才真正拥有 Fit/Fill/IntegerFit 的尺度）：
+### 二选一：选光栅超采样档，不做全分辨率文字层
 
-1. **光栅超采样**（推荐）：`TextStyle` 带一个 `raster_scale`，`FontAtlas` 按 `size × raster_scale`
-   问 swash 要位图，`quad.size` 仍按逻辑尺寸写。代价是页内存按 `scale²` 涨（2.5× 时一个
-   16px 汉字的覆盖率块从 16×16 变 40×40），且 `CacheKey` 含字号却不含 raster_scale ——
-   直接乘进 `Metrics` 会让 cosmic-text 的 key 自己区分开，但要小心同一 (face,size) 在不同
-   倍率下会各占一份装箱。
-2. **文字走全分辨率层**：UI 文字不进虚拟分辨率通路（投影直接用物理 ortho）。清晰但语义上
-   偏离"整帧像素风"，且和 RPG Maker MZ 的实际行为（整帧 canvas 重采样，与现状一致）不符。
+T8 的两条候选里选了 **1. 光栅超采样**。全分辨率文字层（UI 文字不进虚拟分辨率通路、投影
+直接用物理 ortho）确实最省显存，但它把"整帧像素风"劈成两套坐标系：文字不再受 viewport
+栈、clip 栈与 `Instance::tone` 的统一管辖，RGSS 的 `Bitmap#draw_text`（画进**位图**，位图
+当然是虚拟分辨率）会立刻变成两套语义；而且 RPG Maker MZ 自己的真实行为就是整帧 canvas
+重采样，与现状一致。超采样档则一行 API 都不新增通路。
+
+落地是三个动作，`layout` 完全不知道档位存在：
+
+- `atlas::raster_scale_for(scale)`：把"虚拟 → 物理"的有效倍率**向上**取到 2 的幂，
+  档位 ∈ {1, 2, 4}（`MAX_RASTER_SCALE`）。倍率 ≤1（缩小采样）恒为 1 档：多光栅的像素会被
+  扔掉，只白吃页容量。整数 2× 落 2 档，所以像素风那条通路也不吃亏。
+- `FrameCtx::raster_scale()` 给出档位，调用方在 `tick`/`on_event`（拿得到 `ctx` 的地方）
+  喂给 `TextEngine::set_raster_scale`。`examples/windows.rs` 就是这么接的。
+- `FontAtlas::glyph` 查缓存前先 `synth_key`：把键里的 `font_size_bits` 换成
+  `字号 × 档位`、两个 `SubpixelBin` 归零，于是位图按高档光栅，而 **1 档与 2 档的同一个字形
+  在 `glyphs` 里是两个条目**（正是 T6 那条备注担心的"同一 (face,size) 在不同倍率下各占一份
+  装箱"——它是有意的，换档不失效、不重排）。
+
+两处随之而来的细节，都是刻意的：
+
+- **`GlyphRect` 现在带 `scale`**，`size` 是**档内**像素、`offset` 是**逻辑**像素。绘制方
+  算 quad 时 `w = size[0] / scale`。把档位记在条目里而不是让调用点去问图集，是因为图集里
+  同时住着几档，漏问一次就画出一个 2 倍大的字。
+- **bin 归零 ≠ 丢亚像素定位**。1 档时那个 ≤0.375 逻辑像素的余量由 swash 烘进位图；高档
+  把它取出来加在 `offset` 上（即落在 quad 位置上），所以字形之间的相对排布与 1 档一致，
+  只是"从改位图变成改 quad"。
+
+### 代价：页容量按档位平方涨
+
+`MAX_PAGES = 4`（每页 CPU+GPU 各 1MB）没动。2 档让一个字形吃 4 倍面积、4 档 16 倍，所以
+档位跨过去之后页更容易满 —— 满了按既有约定**跳过新字形并告警一次**（宁缺字不画错），
+不会画错东西。因此 `set_raster_scale` 的文档写明"只在窗口尺寸变化时调，不要每帧调"：
+拖窗口时每跨一档就多一套字形进页。真要长期跑四档 + 多字号，抬 `MAX_PAGES` 是唯一的旋钮
+（先确认字号档位数量）。
+
+验收：`tiers_round_up_to_powers_of_two`（档位表）、
+`supersampling_adds_detail_without_moving_the_glyph`（位图翻倍、逻辑尺寸与落点不变、条目共存）、
+`every_tier_keeps_the_same_relative_layout`（三档逐字对齐）、
+`supersampling_changes_coverage_detail_not_the_quads`（从 `draw` 入口看：uv 跨度翻倍而
+`Instance.size/pos` 一像素内不动）、`text_raster_tier_follows_the_upscale`（`FrameCtx` 侧）。
+桌面手测：把窗口从 1:1 拖到 2.5×，日志里的"文字档位"跟着 1x→2x→4x，字在 2.5× 下明显比
+修前硬。
 
 ## 平台矩阵
 
@@ -162,6 +202,7 @@ wasm 的两条硬约束（不是空实现，是平台事实）：
 | --- | --- | --- |
 | 中英混排 / 自动换行（`WordOrGlyph`）/ bidi | ✅ | `Shaping::Advanced`；bidi 只由 cosmic-text 提供，未做黄金验证 |
 | 字号 12/16/24 三档 | ✅ | golden `text_scene.png` 同幅验证 |
+| 光栅超采样档 1/2/4（非整数倍率不发虚） | ✅ T8 | `raster_scale_for` + `FontAtlas::set_raster_scale`，见上一节 |
 | 左/中/右对齐、垂直居中 | ✅ | 对齐在绘制期按 `TextLine::width` 现算，不交给 `set_text` |
 | 彩色字形（CBDT/COLR）、亚像素覆盖 | ❌ 显式跳过 + 告警一次 | 塞进 R8 页会画出错色，不放空实现 |
 | 字形驱逐 / 字号变化后的页回收 | ❌ | 见 `atlas.rs` 模块头；游戏字号只有几档，页满则跳字 |
@@ -173,7 +214,7 @@ wasm 的两条硬约束（不是空实现，是平台事实）：
 ```
 cargo xtask golden          # 现在跑 GOLDENS 两条：sprite_scene + text_scene
 cargo xtask golden --bless  # 重写基线（确认过差异是预期变更之后）
-cargo test --workspace      # 文本 23 单测 + golden 1；渲染侧新增 clip/会话 16 单测
+cargo test --workspace      # 文本 29 单测 + golden 1；渲染侧新增 clip/会话 16 单测
 cargo xtask check-all && cargo xtask clippy && cargo xtask fmt --check
 cargo run --release -p sisf --example windows        # 桌面手测
 cargo xtask web windows                              # wasm：http://127.0.0.1:8080/?ex=windows&wgl

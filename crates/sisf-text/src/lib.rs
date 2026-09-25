@@ -10,13 +10,18 @@
 //! - [`FontAtlas`]：`CacheKey → 覆盖率子矩形`，etagere 装箱 + 自管 `R8Unorm` 页。
 //!
 //! [`TextEngine`] 把三者收在一起，对外只到"往渲染器里画一段文字"。
+//!
+//! 文字在**逻辑像素**上排版（`TextStyle::size` 与 viewport 缩放无关，所以同一套字号
+//! 在任何窗口尺寸下度量都一样），而覆盖率位图按 [`raster_scale_for`] 取到的档位放大
+//! 光栅：非整数放大倍率下不再靠拉伸 1 像素位图过日子，也就是 `docs/text.md` 里那条
+//! "发虚"缺陷的解法。
 
 pub mod atlas;
 pub mod bundle;
 pub mod draw;
 pub mod layout;
 
-pub use atlas::{FontAtlas, GlyphRect, MASK_EPOCH};
+pub use atlas::{FontAtlas, GlyphRect, MASK_EPOCH, MAX_RASTER_SCALE, raster_scale_for};
 pub use bundle::{FontBundle, FontError, WarnOnce};
 pub use draw::TextEngine;
 pub use layout::{Align, GlyphKey, PlacedGlyph, TextLine, TextRun, TextStyle, layout};

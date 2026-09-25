@@ -8,7 +8,7 @@ use sisf_render::{BatchKey, BatchList, Instance};
 use thiserror::Error;
 
 use crate::arena::{SpriteArena, SpriteRef};
-use crate::sprite::{Layer, Sprite};
+use crate::sprite::{Layer, Sprite, Vec2};
 
 /// 一次采集的目标可视口。
 ///
@@ -65,7 +65,7 @@ impl SpriteRef {
 }
 
 impl SpriteArena {
-    /// 采集可视口内的活精灵，追加到 `out`。
+    /// 采集可视口内的活精灵，追加到 `out`（不插值，等价 [`collect_at`](Self::collect_at) 的 `alpha = 1.0`）。
     ///
     /// 过滤掉：`visible == false`、`opacity <= 0`、落点面积为零、`src` 与位图无交集。
     /// 提交顺序是槽号序，最终绘制顺序由 `BatchList` 按 `(layer, epoch, blend, z,
@@ -76,12 +76,27 @@ impl SpriteArena {
         view: ViewportRef,
         out: &mut BatchList<Instance>,
     ) -> Result<(), CollectError> {
+        self.collect_at(view, 1.0, out)
+    }
+
+    /// 定步长采集：落点取 `pos` 按 `App::draw(alpha)` 的 alpha 插值。
+    ///
+    /// `alpha` 只在 `tick_hz` 固定步长下有意义（T8 的 `timing.rs`）：`0` = 上一个 tick
+    /// 的位置、`1` = 本 tick 之后的位置，所以 60Hz 渲染 + 60Hz tick 下逐帧位移看起来是
+    /// 连续的，而逻辑永远看不到半个位置。只有走过 [`Sprite::set_pos`] 的精灵才会动 ——
+    /// 直接写 `pos` 的精灵 `prev_pos` 停在原地（见该字段的文档）。
+    pub fn collect_at(
+        &self,
+        view: ViewportRef,
+        alpha: f32,
+        out: &mut BatchList<Instance>,
+    ) -> Result<(), CollectError> {
         let mut buf = Vec::new();
         for (r, s) in self.iter_live() {
             if !view.accepts(s) {
                 continue;
             }
-            let Some(inst) = instance_of(s, view.layer, r)? else {
+            let Some(inst) = instance_of(s, view.layer, r, s.interpolated(alpha))? else {
                 continue;
             };
             buf.push((
@@ -110,15 +125,17 @@ impl Sprite {
     /// 不经 arena 的单精灵换算，配合 [`sisf_render::Renderer::push`] 手工画一块。
     /// 不可见 / 全透明 / 零面积返回 `Ok(None)`。
     pub fn to_instance(&self, layer: Layer) -> Result<Option<Instance>, CollectError> {
-        instance_of(self, layer, SpriteRef::ANON)
+        instance_of(self, layer, SpriteRef::ANON, self.pos)
     }
 }
 
-/// 精灵 → 实例。`sprite` 参数只用于错误信息里指认元凶。
+/// 精灵 → 实例。`sprite` 参数只用于错误信息里指认元凶，`at` 是本帧的落点
+/// （[`Sprite::interpolated`] 的结果；单独传是为了让插值这件事只出现在采集这一层）。
 fn instance_of(
     s: &Sprite,
     layer: Layer,
     sprite: SpriteRef,
+    at: Vec2,
 ) -> Result<Option<Instance>, CollectError> {
     if !s.visible || s.opacity <= 0.0 {
         return Ok(None);
@@ -135,7 +152,7 @@ fn instance_of(
     let ox = (0.5 - s.anchor.x) * placed.size_abs[0];
     let oy = (0.5 - s.anchor.y) * placed.size_abs[1];
     let (c, sn) = (s.rotation.cos(), s.rotation.sin());
-    let center = [s.pos.x + c * ox - sn * oy, s.pos.y + sn * ox + c * oy];
+    let center = [at.x + c * ox - sn * oy, at.y + sn * ox + c * oy];
     let mut inst = Instance::rect(
         center,
         placed.size,

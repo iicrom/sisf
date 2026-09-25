@@ -6,21 +6,27 @@
 //!   wasm `visibilitychange`。任一生效即上报 `Suspended` 并冻结 tick；Android 额外释放
 //!   `Surface` 与 GPU 资源，`Resumed` 时重建。
 //! - `Resized`/`ScaleFactorChanged` → 重算 `FrameCtx` 投影与输入坐标映射，并请求重配交换链。
+//! - `KeyboardInput` → `EngineEvent::Key`（物理键名 + Press/Repeat/Release），三端同一条
+//!   归一化路径，收到即派发给 `App::on_event`。
+//! - 帧节拍：`RedrawRequested` → `TickClock::step(真实 dt)` → 0..=5 次 `App::tick(周期)`
+//!   → `App::draw(alpha)`。渲染帧率与 `tick_hz` 解耦（`timing` 模块）。
 
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use sisf_event::{EngineEvent, Lifecycle};
+use sisf_event::{EngineEvent, KeyKind, Lifecycle};
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
+use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::app::App;
 use crate::config::AppConfig;
 use crate::frame::FrameCtx;
 use crate::platform;
+use crate::timing::TickClock;
 
 pub(crate) struct RunState<A: App> {
     pub app: A,
@@ -33,7 +39,12 @@ pub(crate) struct RunState<A: App> {
     pub events: Vec<EngineEvent>,
     /// 上一帧的 `platform::now_secs()`；`None` = 挂起后刚恢复，不吃时间。
     pub last: Option<f64>,
+    /// 固定步长时钟：把上面那个真实 `dt` 切成 0..=`MAX_CATCHUP` 个 tick + 一个 `alpha`。
+    pub clock: TickClock,
     /// 累计运行时间（秒，不含挂起期间）→ `FrameU::time`。
+    ///
+    /// 这是**墙钟**，不是逻辑时间（逻辑看 `clock.ticks()`）：着色器里的连续量该跟着
+    /// 画面走，卡顿补帧时不该跟着跳一格。
     pub time: f32,
     pub(crate) winit_suspended: bool,
     pub(crate) occluded: bool,
@@ -50,6 +61,7 @@ pub struct Runner<A: App> {
 impl<A: App> Runner<A> {
     pub fn new(app: A, config: AppConfig) -> Self {
         let frame = FrameCtx::new(&config, config.virtual_size, 1.0);
+        let clock = TickClock::new(config.tick_hz);
         Self {
             state: Rc::new(RefCell::new(RunState {
                 app,
@@ -59,6 +71,7 @@ impl<A: App> Runner<A> {
                 frame,
                 events: Vec::new(),
                 last: None,
+                clock,
                 time: 0.0,
                 winit_suspended: false,
                 occluded: false,
@@ -93,7 +106,9 @@ impl<A: App + 'static> Runner<A> {
                     Lifecycle::Resumed
                 };
                 s.events.push(EngineEvent::Lifecycle(lifecycle));
-                s.last = None; // 不吃挂起期间的时间（T8 冻结累加器同理）
+                // 不吃挂起期间的时间（T8）：`last` 归零 + 累加器冻结，回来第一帧 0 拍。
+                s.last = None;
+                s.clock.reset();
                 if now && cfg!(target_os = "android") {
                     s.renderer = None;
                     s.init_error = None;
@@ -158,11 +173,18 @@ impl<A: App + 'static> Runner<A> {
             .unwrap_or(Duration::ZERO);
         s.last = Some(now);
         s.time += dt.as_secs_f32();
-        s.app.tick(dt, &mut s.frame);
+        // 固定步长：真实 `dt` 只决定"这一帧补几拍"（上限见 `TickClock`），
+        // `App::tick` 因此永远只见到一个周期的 `dt`。
+        let steps = s.clock.step(dt);
+        let period = s.clock.period();
+        for _ in 0..steps {
+            s.app.tick(period, &mut s.frame);
+        }
+        let alpha = s.clock.alpha();
         let frame_u = s.frame.frame_u(s.time);
         let clear = s.config.clear;
         renderer.begin_frame(&frame_u, clear);
-        s.app.draw(1.0, &mut renderer);
+        s.app.draw(alpha, &mut renderer);
         // 空实例集合也走完 pass，等价于 T2 的纯清屏。
         renderer.end_frame();
         s.renderer = Some(renderer);
@@ -170,6 +192,17 @@ impl<A: App + 'static> Runner<A> {
         if let Some(window) = s.window.as_ref() {
             window.request_redraw();
         }
+    }
+}
+
+/// winit 物理键 → 与键盘布局无关的键名（`"ArrowLeft"`、`"KeyW"`）。
+///
+/// 借 `KeyCode` 的 `Debug` 名当词汇表，而不是自己抄一张 200 项的匹配表：变体名本就是
+/// T9 `ActionMap` 要绑的东西。未识别的扫描码带上原编号，不静默成空串。
+fn key_name(key: &PhysicalKey) -> String {
+    match key {
+        PhysicalKey::Code(code) => format!("{code:?}"),
+        PhysicalKey::Unidentified(native) => format!("Native({native:?})"),
     }
 }
 
@@ -245,6 +278,19 @@ impl<A: App + 'static> ApplicationHandler for Runner<A> {
                 s.frame.focused = focused;
                 s.events
                     .push(EngineEvent::Lifecycle(Lifecycle::Focused(focused)));
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                let state = self.state.clone();
+                state.borrow_mut().events.push(EngineEvent::Key {
+                    code: key_name(&event.physical_key),
+                    kind: match event.state {
+                        ElementState::Pressed if event.repeat => KeyKind::Repeat,
+                        ElementState::Pressed => KeyKind::Press,
+                        ElementState::Released => KeyKind::Release,
+                    },
+                });
+                // 输入不等到下一次挂起迁移才派发：立刻喂给 app，本帧的 tick 就能据此改路线。
+                self.drain_events();
             }
             WindowEvent::CloseRequested => {
                 let state = self.state.clone();

@@ -132,6 +132,15 @@ impl SpriteArena {
             .map(|(i, s)| (SpriteRef(i as u32, s.generation), &s.sprite))
     }
 
+    /// [`Self::iter_live`] 的可变版本：动画/路线这类"每 tick 过一遍全场"的推进点用。
+    pub fn iter_live_mut(&mut self) -> impl Iterator<Item = (SpriteRef, &mut Sprite)> {
+        self.slots
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, s)| s.alive)
+            .map(|(i, s)| (SpriteRef(i as u32, s.generation), &mut s.sprite))
+    }
+
     /// 清空（不保留 free list：arena 重建时用，日常增删走 `despawn`）。
     pub fn clear(&mut self) {
         self.slots.clear();

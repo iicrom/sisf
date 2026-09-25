@@ -21,7 +21,7 @@ SpriteArena ──collect(ViewportRef)──▶ BatchList<Instance> ──append
 | anchor / flip_x / flip_y / rotation / scale | ✅ | 见下 |
 | `src` 子矩形 + 越界裁剪 | ✅ | 裁进位图，不拉伸回来 |
 | 多 viewport / 多 layer | ✅ | `Layer(u8)` + `ViewportRef`，同一 arena 可被多个可视口各采一次 |
-| 动画（`AnimDef` / MoveRoute） | ⏸ T8 | `Sprite` 里没有 `anim` 字段，见文末"T5 与清单的差" |
+| 动画（`AnimDef` / MoveRoute） | ✅ T8 | 见下"T8：固定拍上的动画与任务" |
 | 位图渲染目标作源（`Sprite::bitmap` 是 RT） | ⏸ T6 | 采集端已与来源解耦（只要 `Bitmap` 有 epoch + 页内 rect） |
 
 ## 语义
@@ -62,6 +62,39 @@ layer、再按图集页、再按 blend 分批次，`z` 只在同批次内决定�
 `Layer` 一个类型同时当"精灵归属标签"和"投影栈层"用：RPG Maker 里这两个概念本来就是绑定的
 （精灵属于哪个 viewport 就用哪个 viewport 的投影），拆成两个类型只会让它们失同步。
 
+## T8：固定拍上的动画与任务
+
+时间单位换了：`sisf-app::timing::TickClock` 把渲染帧率挡在逻辑之外（累加器 + 一帧最多补
+`MAX_CATCHUP = 5` 拍 + `draw(alpha)` 用余量插值），`anim.rs`/`task.rs` 因此**只用整数拍**记进度。
+补间在第 12 拍到位、路线在第 30 拍走完，120Hz 与 30Hz 屏幕上完全一样。
+
+**动画有两条互斥的通路**（`AnimDef::pattern` 是那条岔路）：
+
+| | 时间驱动（`pattern: None`） | 移动驱动（`pattern: Some(DirPattern)`） |
+| --- | --- | --- |
+| 帧号来自 | `frames[i].dur_ms` 逐帧走，`LoopMode` 管停/回环/往返 | `(dir, step)` 的纯函数：`dir_row(dir) * cols + step % cols` |
+| 谁推进 | `SpriteArena::tick_anims(dt)`，只碰 `pattern: None` 的精灵 | 调用方（`MoveRoute` 每完成一格 `set_step`，或游戏逻辑） |
+| 静止时 | 照常在换帧（火把、灯火） | **永远停在第 0 列** —— 验收那条"静止不换帧"就是这个意思 |
+
+`DirPattern` 两个变体只差列数：`RpgMaker4x3` 是 3 步帧（0 为站立帧）、`RpgMaker2x2` 是 2 帧
+（VX/Ace 的两帧走路）；行侧恒为 `下、左、右、上`（方向键 `2/4/6/8`），帧表按行优先读，与
+`AnimDef::grid` 的装箱序一致。
+
+**`Sprite::dir()` / `step()` 是动画状态，不是普通字段**：精灵没挂 `AnimDef` 时 `Turn` 节点与
+`set_dir` 都是 no-op（没有图样就不知道"朝上"该取哪块 `src`）。写示例时先踩了这个坑 ——
+断言 `MoveRoute` 的 `Turn` 生效，得先给精灵一条 `AnimDef::grid_pattern(..)`。
+
+**任务**（`task.rs`）三条约定：一 tick 只推进一个节点（`Turn`/`FacingLock` 这类瞬时节点也占一拍，
+路线时长 = 各节点拍数之和，完全可预测）；任务绑定一个 `SpriteRef`，精灵被回收后任务自己了断；
+队列默认并行，`MoveRoute::wait(true)` 独占该精灵的队列（RPG Maker 事件指令的"等待移动完成"）。
+`MoveRoute` 有网格与自由两种模式，网格模式逐格走、`walkable` 钩子拿的是**逐拍坐标**且必须 own
+通行表（示例里因此是 `pass.clone()` 进闭包），撞墙只作废本节点的剩余格数、不作废整条路线。
+
+验收：`anim.rs` 14 条（两条图样的朝向行表与四向帧索引、静止不换帧、短帧表夹住不外跑）、
+`task.rs` 15 条（补间按拍回调、撞墙、wait 队列、`MoveTo` 逐轴、`Jump` 跨缝、`FacingLock`）、
+`timing.rs` 6 条（不足一周期不跑逻辑、`alpha` = 余量、尖峰只补 5 拍并记 `dropped`、
+`reset` 冻结）；端到端在 `examples/tiled_map.rs`（三层 tilemap + 键盘四向行走 + 事件格碰撞）。
+
 ## golden
 
 `crates/sisf-sprite/tests/golden_sprite.rs`，`cargo xtask golden`（`--bless` 重写基线）。
@@ -101,8 +134,8 @@ T6 起装箱四周留 `GUTTER = 1px` 复制边（`AtlasLayout` 的 `upload` 矩�
 
 ## T5 与清单的差
 
-1. **`Sprite` 没有 `anim` 字段**。`AnimDef`/`AnimState`/步帧是 T8 的整套机制，提前塞一个
-   `Option<AnimDef>` 只会让 T8 重新设计它；现在把"当前帧 → `src`"的决定留在调用方。
+1. ~~**`Sprite` 没有 `anim` 字段**~~ —— T8 补上了（`Option<AnimState>` + `SpriteArena::tick_anims`），
+   采集路径仍然不知道动画存在：换帧只是把 `rect()` 写回 `src`，`collect` 一个分支都没多。
 2. **`BlendMode` 是类型别名**（`= sisf_render::Blend`）而不是新枚举 —— 变体必须与管线一一对应，
    多出来的 `Multiply/Screen` 无处可去。
 3. **代号字段叫 `generation` 不叫 `gen`**：edition 2024 把 `gen` 列为保留关键字，

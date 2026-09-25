@@ -38,7 +38,8 @@ pub struct FrameCtx {
     pub physical_size: (u32, u32),
     pub virtual_size: (u32, u32),
     pub scale_factor: f64,
-    /// 虚拟画面占据的物理矩形（letterbox 后）。
+    /// 虚拟画面占据的物理矩形（letterbox 后）。边条宽度取整，故整数倍缩放时原点落在
+    /// 物理像素格上（不半像素）。
     pub viewport: Viewport,
     /// 虚拟→物理的等比系数（Fill 时为各轴分别缩放，此处存 x 轴）。
     pub scale: f32,
@@ -113,9 +114,13 @@ impl FrameCtx {
             }
         };
         self.scale = scale;
+        // letterbox 原点向下取整：整数倍缩放下窗口边长为奇数时 `(pw - w)/2` 落在半像素
+        // 上，而 1:1 的内容平移半像素意味着每个像素都采样在两个纹素正中（整体发糊），
+        // resize 一格还会在两个相位之间跳（抖动）。左右边条差一个像素是无害的。
+        let pad = |slack: f32| (slack / 2.0).max(0.0).floor();
         self.viewport = Viewport {
-            x: ((pw - w) / 2.0).max(0.0),
-            y: ((ph - h) / 2.0).max(0.0),
+            x: pad(pw - w),
+            y: pad(ph - h),
             width: w,
             height: h,
         };
@@ -203,6 +208,15 @@ impl FrameCtx {
         let vy = (physical.1 as f32 - vp.y) / if vp.height > 0.0 { vp.height } else { 1.0 }
             * self.virtual_size.1 as f32;
         (vx, vy)
+    }
+
+    /// 文字覆盖率的光栅超采样档位，喂给 `TextEngine::set_raster_scale`。
+    ///
+    /// 取自 [`Viewport`] 的那个等比系数（`FrameCtx::scale`）：`Fill` 下两轴倍率不同，
+    /// 按 x 轴取档 —— 少的那一轴只会更少地用到位图细节，不会反过来发虚。
+    /// 虚拟→物理是缩小（`scale ≤ 1`）时为 1 档，多光栅的像素会被扔掉。
+    pub fn raster_scale(&self) -> f32 {
+        sisf_text::raster_scale_for(self.scale)
     }
 }
 
@@ -310,5 +324,106 @@ mod tests {
         assert_eq!(f.proj[2], f.proj[0]);
         assert_eq!(f.proj[7], f.proj[0]);
         assert_ne!(f.proj[1], f.proj[0]);
+    }
+
+    /// 整数倍缩放 + 奇数边长的窗口：边条取整，虚拟像素格与物理像素格必须同相。
+    ///
+    /// 这就是"半像素抖动"那条验收：1001×701 装 544×416 时未取整的原点是 (228.5, 142.5)，
+    /// 1:1 的内容被平移半像素 ⇒ 每个像素都采样在两个纹素正中，糊且随 resize 跳相。
+    #[test]
+    fn integer_fit_with_odd_padding_stays_on_the_pixel_grid() {
+        let cfg = AppConfig {
+            scale_mode: ScaleMode::IntegerFit,
+            ..Default::default()
+        };
+        let ctx = FrameCtx::new(&cfg, (1001, 701), 1.0);
+        assert_eq!(ctx.scale, 1.0);
+        assert_eq!(
+            (ctx.viewport.x, ctx.viewport.y),
+            (228.0, 142.0),
+            "边条没取整"
+        );
+        let f = ctx.frame_u(0.0);
+        for v in [0.0f32, 1.0, 272.0, 543.0, 544.0] {
+            let c = xform(&f.proj[0], [v, v, 0.0, 1.0]);
+            let (px, py) = ((c[0] + 1.0) * 1001.0 / 2.0, (1.0 - c[1]) * 701.0 / 2.0);
+            assert!(
+                (px - px.round()).abs() < 1e-3 && (py - py.round()).abs() < 1e-3,
+                "虚拟格线 {v} 落在了亚像素上: px={px} py={py}"
+            );
+        }
+    }
+
+    /// 三种缩放下的点击命中：物理像素中心 → 虚拟像素中心，取整就是格子号。
+    #[test]
+    fn pointer_hits_the_expected_cell_after_the_letterbox() {
+        let int_fit = AppConfig {
+            scale_mode: ScaleMode::IntegerFit,
+            ..Default::default()
+        };
+        let ctx = FrameCtx::new(&int_fit, (1001, 701), 1.0);
+        // 第 (3,2) 号虚拟像素的中心在物理 (228+3.5, 142+2.5)。
+        let (vx, vy) = ctx.map_pointer((231.5, 144.5));
+        assert_eq!(
+            (vx.floor() as i32, vy.floor() as i32),
+            (3, 2),
+            "边条取整后命中点偏了: {vx},{vy}"
+        );
+        // 右下角最后一个像素仍落在画面内（边条取整不许吃掉内容）。
+        let (lx, ly) = ctx.map_pointer((771.5, 557.5));
+        assert_eq!(
+            (lx.floor() as i32, ly.floor() as i32),
+            (543, 415),
+            "右下角被切掉了一格: {lx},{ly}"
+        );
+
+        // Fill 拉伸铺满，无 letterbox：几何中心仍是中心。
+        let fill = AppConfig {
+            scale_mode: ScaleMode::Fill,
+            ..Default::default()
+        };
+        let ctx = FrameCtx::new(&fill, (1001, 701), 1.0);
+        assert_eq!((ctx.viewport.x, ctx.viewport.y), (0.0, 0.0));
+        let (cx, cy) = ctx.map_pointer((500.5, 350.5));
+        assert!(
+            (cx - 272.0).abs() < 0.5 && (cy - 208.0).abs() < 0.5,
+            "Fill 下中心不对: {cx},{cy}"
+        );
+
+        // Fit 非整数倍 + 取整边条：中心与角落都要自洽（投影与映射同源）。
+        let ctx = FrameCtx::new(&AppConfig::default(), (1000, 700), 1.0);
+        assert_eq!(ctx.viewport.x, 42.0, "Fit 的边条也该取整");
+        let mid = f64::from(ctx.viewport.x + ctx.viewport.width / 2.0);
+        let (cx, _) = ctx.map_pointer((mid, 350.0));
+        assert!(
+            (cx - 272.0).abs() <= 1.0,
+            "Fit 下画面水平中心映射偏了: {cx}"
+        );
+    }
+
+    /// 文字光栅档位跟着有效倍率走：1:1 不超采样，整数 2× 要 2 档才不糊。
+    #[test]
+    fn text_raster_tier_follows_the_upscale() {
+        let fit = AppConfig::default();
+        assert_eq!(
+            FrameCtx::new(&fit, (544, 416), 1.0).raster_scale(),
+            1.0,
+            "1:1 映射多光栅纯属浪费页容量"
+        );
+        assert_eq!(FrameCtx::new(&fit, (1088, 832), 1.0).raster_scale(), 2.0);
+        assert_eq!(
+            FrameCtx::new(&fit, (400, 300), 1.0).raster_scale(),
+            1.0,
+            "缩小采样时档位回 1"
+        );
+        let int_fit = AppConfig {
+            scale_mode: ScaleMode::IntegerFit,
+            ..Default::default()
+        };
+        assert_eq!(
+            FrameCtx::new(&int_fit, (1632, 1248), 1.0).raster_scale(),
+            4.0,
+            "3× 整数放大取 4 档"
+        );
     }
 }

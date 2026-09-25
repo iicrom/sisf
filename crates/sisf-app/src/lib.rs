@@ -5,11 +5,13 @@ pub mod config;
 pub mod frame;
 pub mod platform;
 pub(crate) mod runner;
+pub mod timing;
 
 pub use app::App;
 pub use config::{AppConfig, ScaleMode};
 pub use frame::{FrameCtx, Viewport};
 pub use runner::Runner;
+pub use timing::{MAX_CATCHUP, TickClock};
 
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
 pub use wasm_bindgen;
