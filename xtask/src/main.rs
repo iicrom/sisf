@@ -227,8 +227,12 @@ fn workspace_root() -> PathBuf {
 }
 
 fn web(example: &str) -> i32 {
+    // release：debug 的 `tiled_map_bg.wasm` 是 32.5MB、release 8.2MB，而软件 WebGL 下每毫秒都值钱
+    // —— 浏览器侧量到的"节拍噪声"有一半就是这个没优化的产物。诊断通道不受档位影响：
+    // panic 钩子在 `platform/wasm.rs` 里无条件安装。
     let code = check(&[
         "build",
+        "--release",
         "-p",
         "sisf",
         "--example",
@@ -246,7 +250,7 @@ fn web(example: &str) -> i32 {
     let wasm = root
         .join("target")
         .join(WASM_TARGET)
-        .join("debug")
+        .join("release")
         .join("examples")
         .join(format!("{example}.wasm"));
     if !wasm.exists() {

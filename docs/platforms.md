@@ -129,10 +129,14 @@ cargo xtask web           # 构建 wasm + wasm-bindgen 到 web/pkg，并在 127.
 cargo xtask web tiled_map # 换示例：不带示例名时缺省只构建 hello_window
 ```
 
+- **构建走 `--release`**：同一个 `tiled_map` 示例，debug 的 `web/pkg/tiled_map_bg.wasm` 是 32.5MB、
+  release 8.17MB，而浏览器侧多半跑在软件 WebGL（`?wgl` ⇒ ANGLE Microsoft Basic Render Driver）上，
+  没优化的产物本身就是节拍噪声的一大来源（`todo.md` T8 复盘）。增量重编 20s，可接受。
+  诊断通道与档位无关：panic 钩子在 `platform/wasm.rs` 里无条件安装。
 - 打开 `http://127.0.0.1:8080/index.html`：WebGPU 优先。
 - 打开 `http://127.0.0.1:8080/index.html?wgl`：强制 WebGL2 回退（`requested_backends()` 读 URL）。
 - **响应带 `Cache-Control: no-store`**：这个服务不发 `ETag`/`Last-Modified`，浏览器只能启发式缓存，
-  于是改完重编后**普通刷新（F5）还在跑旧的 32MB wasm**，看着完全像"修了没生效"。开发服务宁可每次读盘。
+  于是改完重编后**普通刷新（F5）还在跑旧的几十 MB wasm**，看着完全像"修了没生效"。开发服务宁可每次读盘。
 - **网页上示例的倍率恒为 1.00**：winit 的 `set_canvas_size` 只写 canvas 的 **CSS style**，不动
   `width/height` 属性（`winit-0.30.13/src/platform_impl/web/web_sys/mod.rs:71-85`），而
   `web/index.html` 把属性钉成 544×416 ⇒ 物理尺寸永远是 544×416、`IntegerFit` 只能给出 1×。

@@ -369,9 +369,21 @@
   （较上条 +5：上面四条新单测 + `the_camera_never_steps_backwards_in_any_direction`
   由临时扫描转正；`--example tiled_map` 15 → **17 绿**，`sisf-sprite --lib` 48 → **51 绿**）、
   `cargo xtask golden` 两条全绿。用户肉眼复验（2026-09-25）：**"解决了"** —— 桌面与浏览器两条链路
-  都由用户自己看过，本次不再需要逐帧读数。剩下的是另一件事：帧节奏（debug native 约 7.6% 帧
-  ≥2 vsync；`cargo xtask web` 出的是 debug wasm 32.5MB vs release 8.2MB —— 要不要让它默认
-  `--release` 待定，见下"残余问题"）。
+  都由用户自己看过，本次不再需要逐帧读数。
+- 复验之后顺手收掉那条挂着的**帧节奏**决定：`cargo xtask web` 从 debug 改成 **`--release`**
+  （`xtask/src/main.rs::web`，产物路径随之从 `target/wasm32-unknown-unknown/debug/examples` 换到
+  `release/examples`）。理由与实测：同一个 tiled_map，debug 的 `web/pkg/tiled_map_bg.wasm`
+  **32.5MB → 8.17MB**，而浏览器那条链路多半跑在软件 WebGL（`?wgl` ⇒ ANGLE Microsoft Basic Render
+  Driver）上，未优化的产物本身就是节拍噪声的一大来源；增量重编 **19.89s**，日常可接受。
+  诊断通道不受档位影响（panic 钩子在 `platform/wasm.rs::install_panic_hook` 里无条件安装）。
+  新链路实跑（`cargo xtask web tiled_map` + `?ex=tiled_map&wgl`）：console 打出
+  `main 已启动` → `adapter: ANGLE (Microsoft, Microsoft Basic Render Driver …, Gl)` →
+  `物理 544x416 ⇒ 画面 (0,0) 544x416，倍率 1.00，光栅档 1` → `字体 Some("Inter")（face 1）`，
+  两次抓屏 HUD 从 `tick 1847 a0.50 cell 12,12 cam 128,184` 走到 `tick 3604 a0.00`（⇒ 逻辑拍在跑，
+  不是定格），同一页面自测 `requestAnimationFrame` 计数 = **72 次/秒**。
+  ⚠️ 这条只证明"release 链路通、画面在动"，**没有**给出帧时长分布 —— 那要的是另一套探针，
+  且 debug native 的 7.6% 长帧那条读数仍然只在 native 侧成立。文档同步在
+  `docs/platforms.md`「Web」。
 - 验收（整段）：anim/route/timing 单测 + tiled_map → 提交 `P7 anim+route+tick`。→ 落地说明见 `docs/sprite.md`「T8：固定拍上的动画与任务」（两条互斥动画通路的分工表、任务三约定、`dir()/step()` 是动画状态）+ `docs/platforms.md`（letterbox 只管投影不管裁剪、HUD 必须挂更高 viewport 层）+ `docs/text.md`（文字层号：`draw_text_at`）。闸门（都用原命令）：`cargo xtask fmt --check` 净、`cargo xtask clippy`（win `--all-targets -D warnings` + wasm32 web）0 warning、`cargo xtask check-all` 四组 0 warning、`cargo test --workspace --all-features` 全绿 0 红、`cargo xtask golden` 全绿（文字基线不受新参数影响）。
 
 ### T8 期间发现并修正的事实（供后续阶段引用）
