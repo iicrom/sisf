@@ -880,6 +880,54 @@ mod tests {
         assert!(sched.pending(handle));
     }
 
+    /// 停拍不变量在任务层的形状（"红色人物移动后人物抖"）：走完一格进入 `Wait` 之后，
+    /// **被画出来的点**（[`Sprite::interpolated`]）必须逐拍恒定。
+    ///
+    /// 路线只管位移，`prev_pos` 得由每拍开头的 [`SpriteArena::begin_tick`] 收拢；少了那一行，
+    /// `Wait` 的每一拍都把最后一跳留在 `prev_pos`/`pos` 之间，被 `alpha` 的 `0→1` 来回重播。
+    #[test]
+    fn a_wait_node_draws_the_same_point_every_frame() {
+        let mut arena = SpriteArena::new();
+        let handle = walker(&mut arena);
+        let mut sched = TaskScheduler::new();
+        sched.schedule(
+            handle,
+            MoveRoute::grid(
+                vec![
+                    RouteNode::Move {
+                        dir: DIR_RIGHT,
+                        cells: 1,
+                    },
+                    RouteNode::Wait { ticks: 6 },
+                ],
+                TILE,
+                TILE,
+            )
+            .wait(true),
+        );
+
+        let mut drawn = Vec::new();
+        for _ in 0..8 {
+            arena.begin_tick();
+            sched.tick(&mut arena);
+            let s = arena.get(handle).unwrap();
+            drawn.push((
+                s.interpolated(0.0),
+                s.interpolated(0.5),
+                s.interpolated(1.0),
+            ));
+        }
+        // 对照组：第一拍确实跳了一格（否则"恒定"是白测）。
+        assert_eq!((drawn[0].0.x, drawn[0].2.x), (0.0, 32.0), "第一拍没有位移");
+        for (i, &(a, b, c)) in drawn[1..].iter().enumerate() {
+            assert!(
+                a == b && b == c && a.x == 32.0,
+                "Wait 第 {} 拍画面上还在动：{a:?} / {b:?} / {c:?}",
+                i + 1
+            );
+        }
+    }
+
     #[test]
     fn grid_move_to_hops_axis_by_axis_until_it_arrives() {
         let mut arena = SpriteArena::new();

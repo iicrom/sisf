@@ -1215,6 +1215,10 @@ impl App for TiledMap {
 
     fn tick(&mut self, dt: Duration, ctx: &mut FrameCtx) {
         self.ticks += 1;
+        // 每拍开头先把 `prev_pos` 收拢：这一拍没动的精灵（走一格后的停拍、NPC 的 `Wait`、
+        // 撞墙被作废）就不该有可播的位移，否则 `interpolated(alpha)` 把最后一跳来回重播。
+        // 必须在任何移动之前 —— `tick_anims` 在本拍末尾，那时收拢等于把位移当场抹掉。
+        self.arena.begin_tick();
         if ctx.physical_size != self.phys {
             self.phys = ctx.physical_size;
             let v = ctx.viewport;
@@ -1696,6 +1700,18 @@ mod tests {
         );
     }
 
+    /// 逐帧相机读数的"站稳之后"切片：从第一个"连续 `run` 帧读数相同"的位置起算。
+    ///
+    /// 松手不等于立刻停住 —— 路上那一格还要走完（一格 = 16 拍），所以判据只能从稳定点起算。
+    /// 找不到稳定点就是"相机一直没停"，直接 panic。
+    fn settled_tail<'a>(seq: &'a [f32], run: usize, what: &str) -> &'a [f32] {
+        let start = seq
+            .windows(run)
+            .position(|w| w.windows(2).all(|p| p[0] == p[1]))
+            .unwrap_or_else(|| panic!("{what}：相机从没站稳 {seq:?}"));
+        &seq[start + run - 1..]
+    }
+
     /// 第三次报回的抖动（"还是抖，人物不抖背景抖"）回归：把浏览器实测的乱拍（54fps 上下，
     /// 12/18/24ms 交替）喂进 `TickClock`，逐帧读相机的物理位置。
     ///
@@ -1747,6 +1763,169 @@ mod tests {
             (moved - ideal_total).abs() <= 2.0,
             "{t:.3}s 里只滚了 {moved}px，理想 {ideal_total}px"
         );
+
+        // 停手相：乱拍不会因为"不再位移"就变成恒定 `alpha`，所以停下来的那一段才是重播
+        // 最后一跳最容易露出来的地方（`standing_still_...` 查恒定 165Hz，这条查抖动节拍）。
+        // 必须先回到能滚动的区间：上面 84 帧已经把相机顶到地图上边缘，那里怎么弹都不动。
+        app.keys.set(Dir::Up, false);
+        for i in 0..24 {
+            let ms = cadence[i % cadence.len()];
+            for _ in 0..clock.step(Duration::from_secs_f64(ms / 1000.0)) {
+                app.tick(period, &mut ctx);
+            }
+            app.prepare(clock.alpha(), &mut ctx);
+        }
+        let before = app.cam.y * scale;
+        app.keys.set(Dir::Down, true);
+        for i in 0..18 {
+            let ms = cadence[i % cadence.len()];
+            for _ in 0..clock.step(Duration::from_secs_f64(ms / 1000.0)) {
+                app.tick(period, &mut ctx);
+            }
+            app.prepare(clock.alpha(), &mut ctx);
+        }
+        app.keys.set(Dir::Down, false);
+        let rolled = app.cam.y * scale;
+        assert!(
+            rolled > before,
+            "对照组失效：松手前相机根本没滚（{before} → {rolled}），后面的\"恒定\"是白测"
+        );
+        let mut rest = Vec::new();
+        for i in 0..60 {
+            let ms = cadence[i % cadence.len()];
+            for _ in 0..clock.step(Duration::from_secs_f64(ms / 1000.0)) {
+                app.tick(period, &mut ctx);
+            }
+            app.prepare(clock.alpha(), &mut ctx);
+            rest.push(app.cam.y * scale);
+        }
+        // 松手时那一格还在路上，走完它之后就没有任何一帧能把相机带回去了。
+        let rest = settled_tail(&rest, 8, "松手后相机一直在动");
+        assert!(
+            rest.iter().all(|&v| v == rest[0]),
+            "停手之后相机还在来回弹：{rest:?}（落点 {rolled}）"
+        );
+    }
+
+    /// 第四次报回的抖动（"红色人物移动后人物抖，玩家角色移动后地图抖"）回归：走一格停手之后，
+    /// 相机必须**逐帧不动**。`interpolated = prev_pos.lerp(pos, alpha)` 只在 `set_pos` 里推进
+    /// `prev_pos`，所以"这一拍没动"的精灵会把最后一跳留在 `prev_pos`/`pos` 之间，被 `alpha`
+    /// 的 `0→1` 一遍遍重播 —— 画面退回一步再走回来，且方向就是刚才移动的那个轴。
+    ///
+    /// 节拍必须**变化**才测得到这条：每帧正好喂一个周期会让 `alpha` 恒为 0，插值没有相位可数。
+    /// 这里用浏览器/165Hz 的真实形状（三帧两拍不到），停手后 `alpha` 照样在 `0→1` 之间循环。
+    #[test]
+    fn standing_still_must_not_replay_the_last_hop() {
+        use std::time::Duration;
+
+        /// 按 `n` 帧 165Hz 节拍推 `app`，逐帧记下相机的物理 X。
+        fn drive(
+            app: &mut TiledMap,
+            ctx: &mut FrameCtx,
+            clock: &mut sisf::app::TickClock,
+            n: u32,
+            out: &mut Vec<f32>,
+        ) {
+            let period = clock.period();
+            for _ in 0..n {
+                // 6.0606ms = 165Hz：三帧不到两拍，`alpha` 会走遍 0 / 0.5 / 1 三个格点档位。
+                let dt = Duration::from_secs_f64(6.0606 / 1000.0);
+                for _ in 0..clock.step(dt) {
+                    app.tick(period, ctx);
+                }
+                app.prepare(clock.alpha(), ctx);
+                out.push(app.cam.x * ctx.scale);
+            }
+        }
+
+        let mut app = TiledMap::new();
+        for p in app.world.pass.iter_mut() {
+            *p = true;
+        }
+        let mut ctx = FrameCtx::new(&config(), (544, 416), 1.0);
+        let mut clock = sisf::app::TickClock::new(60.0);
+        app.keys.set(Dir::Right, true);
+        let mut walked = Vec::new();
+        drive(&mut app, &mut ctx, &mut clock, 60, &mut walked);
+        assert!(
+            walked[59] > walked[0],
+            "对照组失效：按住右键 60 帧相机没往前走"
+        );
+        app.keys.set(Dir::Right, false);
+        let mut idle = Vec::new();
+        drive(&mut app, &mut ctx, &mut clock, 60, &mut idle);
+        let rest = settled_tail(&idle, 6, "松手后相机从没站稳");
+        let first = rest[0];
+        let moved: Vec<(usize, f32)> = rest
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| **v != first)
+            .map(|(i, v)| (i, *v - first))
+            .collect();
+        assert!(
+            moved.is_empty(),
+            "站稳之后相机还在来回弹（停拍重播了最后一跳）：{moved:?} 整段={idle:?}"
+        );
+    }
+
+    /// 把上面那条钉住的判据摊到 4 个方向 × 倍率 {1,2} × 6 种节拍（含尖峰与奇偶配对），
+    /// 逐帧（180 帧）查相机有没有回退。
+    #[test]
+    fn the_camera_never_steps_backwards_in_any_direction() {
+        use std::time::Duration;
+
+        let cadences: [(&str, &[f64]); 6] = [
+            ("60hz", &[16.6667]),
+            ("120hz", &[8.3333]),
+            ("144hz", &[6.9444]),
+            ("56hz-jitter", &[18.2, 12.1, 24.3, 15.0]),
+            ("spike", &[16.7, 16.7, 250.0, 16.7, 16.7, 90.0]),
+            ("odd-pair", &[11.0, 22.0]),
+        ];
+        for (phys, want) in [((544u32, 416u32), 1.0f32), ((1088, 832), 2.0)] {
+            for dir in [Dir::Up, Dir::Down, Dir::Left, Dir::Right] {
+                for (name, dt) in cadences {
+                    let mut app = TiledMap::new();
+                    for p in app.world.pass.iter_mut() {
+                        *p = true;
+                    }
+                    let mut ctx = FrameCtx::new(&config(), phys, 1.0);
+                    assert_eq!(ctx.scale, want);
+                    app.keys.set(dir, true);
+                    let mut clock = sisf::app::TickClock::new(60.0);
+                    let period = clock.period();
+                    let mut seq = Vec::new();
+                    for i in 0..180 {
+                        let d = Duration::from_secs_f64(dt[i % dt.len()] / 1000.0);
+                        for _ in 0..clock.step(d) {
+                            app.tick(period, &mut ctx);
+                        }
+                        app.prepare(clock.alpha(), &mut ctx);
+                        seq.push(if dir == Dir::Left || dir == Dir::Right {
+                            app.cam.x * want
+                        } else {
+                            app.cam.y * want
+                        });
+                    }
+                    let back = if dir == Dir::Up || dir == Dir::Left {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    let v: Vec<f64> = seq.iter().map(|s| f64::from(*s) * back).collect();
+                    let bad: Vec<(usize, f64, f64)> = v
+                        .windows(2)
+                        .enumerate()
+                        .filter(|(_, w)| w[1] < w[0])
+                        .map(|(i, w)| (i, w[0], w[1]))
+                        .collect();
+                    assert!(
+                        bad.is_empty(),
+                        "dir {dir:?} ×{want} {name}: 相机回退 {bad:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// 三层 + y 排序：同一 epoch 之下 z 才有决定权，这里合成一批并读出画序。

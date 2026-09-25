@@ -346,6 +346,30 @@
     `the_camera_lattice_is_the_device_pixel_grid_not_the_virtual_one`；
     `cargo test -p sisf --all-features --example tiled_map` 10 → **15 绿**，
     `cargo test -p sisf-sprite --lib` **48 绿**）、`cargo xtask golden` 两条全绿。
+- 第四次 + 第五次报回（"**红色人物移动后人物抖，玩家角色移动后地图抖**"，桌面 release 与浏览器同时复现，
+  与前三次同形）：第 20 条只修掉了**路线收尾**那一种空转拍，剩下的一半是**所有"这一拍没动"的拍** ——
+  `prev_pos` 只被 `set_pos` 推进，于是玩家走完一格松手的停拍、NPC `RouteNode::Wait` 的每一拍、
+  撞墙被作废的剩余格数，都把最后一跳留在 `prev_pos`/`pos` 之间，被 `alpha` 的 `0→1` 一遍遍重播
+  （NPC 自己弹 ⇒ "人物抖"；玩家弹带动跟随相机 ⇒ "地图抖"）。逐帧日志坐实：静止段
+  `heroD 256.00,386.00 camD 0.00,154.00` → `385/153` → `384/152` → 回到 `385/153`，
+  而 `alpha` 只是在 `0.18→0 / 0.55→0.5 / 0.91→1` 之间循环。
+  **修法不是让每个逻辑各自记得推进，而是引擎侧统一收拢**：新增 `Sprite::begin_tick` /
+  `SpriteArena::begin_tick`（`App::tick` 第一行调一次，必须在任何移动之前 —— `tick_anims` 在拍尾，
+  那时收拢等于把本拍位移当场抹掉），约定写进 `docs/sprite.md`。四道新单测全部**先证伪再证真**
+  （把 `begin_tick` 那一行注掉即红）：`begin_tick_erases_a_hop_that_the_new_tick_does_not_repeat`
+  （红：`alpha 0 重播了最后一跳`）、`arena_begin_tick_folds_every_live_sprite`、
+  `a_wait_node_draws_the_same_point_every_frame`（红：`Wait 第 1 拍画面上还在动：0.0/16.0/32.0`）、
+  `standing_still_must_not_replay_the_last_hop`（红：`相机从没站稳 [170,171,172,…,191,191,192,190,…]`），
+  并给 `the_camera_tracks_the_ideal_scroll_under_a_jittery_frame_rate` 补了**松手相**
+  （红：`停手之后相机还在来回弹 [31,33,35,…,55,54,54,55,56,55,…]`；先倒回可滚动区间再松手 ——
+  顶到地图边缘时怎么弹读数都不变，那是白测）。第 24 条那句"相机回退已穷举排除"据此修正：
+  那个穷举只按住方向键不放（走位段每一拍都在推进 `prev_pos`，本来就测不到），**缺的正是停手相**。
+  闸门重跑（原命令，退出码全 0）：`cargo xtask fmt --check` 净、`cargo xtask clippy` 两组 0 warning、
+  `cargo xtask check-all` 四组 0 warning、`cargo test --workspace --all-features` **245 绿 0 红**
+  （较上条 +5：上面四条新单测 + `the_camera_never_steps_backwards_in_any_direction`
+  由临时扫描转正；`--example tiled_map` 15 → **17 绿**，`sisf-sprite --lib` 48 → **51 绿**）、
+  `cargo xtask golden` 两条全绿。桌面/wasm 的肉眼复验：⏳ 待用户确认（`cargo xtask web` 的探针已按约定
+  还原，wasm 侧帧时长那条是另一件事，见"残余问题"）。
 - 验收（整段）：anim/route/timing 单测 + tiled_map → 提交 `P7 anim+route+tick`。→ 落地说明见 `docs/sprite.md`「T8：固定拍上的动画与任务」（两条互斥动画通路的分工表、任务三约定、`dir()/step()` 是动画状态）+ `docs/platforms.md`（letterbox 只管投影不管裁剪、HUD 必须挂更高 viewport 层）+ `docs/text.md`（文字层号：`draw_text_at`）。闸门（都用原命令）：`cargo xtask fmt --check` 净、`cargo xtask clippy`（win `--all-targets -D warnings` + wasm32 web）0 warning、`cargo xtask check-all` 四组 0 warning、`cargo test --workspace --all-features` 全绿 0 红、`cargo xtask golden` 全绿（文字基线不受新参数影响）。
 
 ### T8 期间发现并修正的事实（供后续阶段引用）
@@ -493,12 +517,33 @@
     （`platform_impl/web/web_sys/mod.rs:71-85`），而 `web/index.html` 把属性钉成 544×416 ⇒
     **网页上 `IntegerFit` 只能算出倍率 1.00**（不管 DPR 是多少），2× 的设备格点那条路只有桌面窗口
     拉大才会走到。所以"网页抖"绝不能拿 2× 单测当解释。
-24. **"相机回退"已经穷举排除，别再往这个方向查**：把 `TickClock` 的逐帧差分
-    （读 `cam × scale`）在 **2 个倍率（1×/2×）× 4 个方向 × {60.00/59.94/120/144Hz, 实测乱拍}** 上跑
-    200 帧，**回退次数恒为 0**；分布里那些 `0` 是相机夹边（`cam ∈ [0,224]`，从出生格 12,12 走到边
-    正好 92/64/20/48 帧），不是停顿。60Hz 下是完美的每帧 -2 设备像素，144Hz 下是 -1/0 交替（18% 空帧
-    = 固定 60Hz 步长在高刷新上的固有顿挫，不是回弹）。真要看回弹只剩两条源：旧产物（第 23 条）与
-    `TickClock::reset()`/`MAX_CATCHUP` 丢时间后 `alpha` 从 1 掉回小值那一帧（各 1~2px，一次性）。
+24. ~~**"相机回退"已经穷举排除，别再往这个方向查**~~ —— **这条被第四次报回推翻，教训比结论有用**：
+    穷举的形状是 2 个倍率（1×/2×）× 4 个方向 × {60.00/59.94/120/144Hz, 实测乱拍} 跑 200 帧、
+    读 `cam × scale` 的逐帧差分，**回退次数恒为 0**（分布里那些 `0` 是相机夹边
+    `cam ∈ [0,224]`，不是停顿）。问题不在测量，在**取样区间**：整段都按着方向键，而走位期间每一拍
+    都在推进 `prev_pos` ⇒ 重播最后一跳这个 bug 在那段数据里根本不存在。停手之后才有停拍，
+    而停手之后的读数没人看过一眼。判据转正成单测
+    `the_camera_never_steps_backwards_in_any_direction`（4 方向 × {1×,2×} × 6 节拍，180 帧，
+    含尖峰与奇偶配对节拍），并且**必须配一条停手相的**（`standing_still_must_not_replay_the_last_hop`）：
+    单调性判据在"一直按着键"时是绿的，对静止段的来回弹完全失明。
+25. **`prev_pos` 的不变量只能由引擎兜，不能由每个逻辑兜**（第四次报回的真因，也是第 20 条的另一半）。
+    "每个被 `TickClock` 消耗的周期都必须推进 `prev_pos`/`pos`"这条写在第 20 条里的不变量，
+    修法是把最后一步的收尾拍在 `MoveRoute::finish` 里补掉 —— 但消费者不止路线：停手后的玩家、
+    `Wait` 里的 NPC、撞墙被作废的剩余格数，全都是"这一拍没有 `set_pos`"的拍，每一个都得自己推进
+    `prev_pos`，漏一个就弹一个。所以改成 `App::tick` 第一行 `arena.begin_tick()`（全场
+    `prev_pos = pos`），把"没动"变成一种由引擎保证的常态。**顺序是这条的一半**：`tick_anims`
+    之类在拍尾的收拢会把本拍位移当场抹掉，所以只有拍首一个位置是对的。
+26. **wasm32-unknown-unknown 上没有 `std::time::Instant`，示例侧的帧探针不能自己计时**：
+    std 在该 target 无时钟，`Instant::now()` 直接 panic（`sys/time/unsupported.rs`），而引擎的
+    `platform::now_secs()`（wasm 走 `performance.now()`）是 `pub(crate)`，示例拿不到。
+    要量帧时长就换**不需要时钟的形状**：固定步长下"这一帧补了几拍"就是帧长（`拍数 × 周期`），
+    逐帧只数 `App::tick` 的调用次数。⚠️ 两条读数陷阱：`MAX_CATCHUP=5` 会截断尖峰（读到的是下界）、
+    `TickClock::reset()` 那一拍记 0；而 ticks/帧恒为 0 说明这段时间根本没在出帧
+    （页面被遮挡/挂起），拿它算出来的"很干净"是假的。
+27. **"抖动"报回要按"谁在抖 + 什么时候抖"两轴收窄，而不是按代码模块**：前三次分别落在
+    相机相位（走位期间）、像素格点（走位期间满屏）、周期记账（每格一次）—— 共同点是**都在走位期间**，
+    于是排查也一路锁在走位段。第四次"人物不动也抖、停手才抖"才把取样区间换掉。同一条判据
+    （逐帧位移是否回退）在两个取样区间下给出相反的答案，而只有后一个是用户看到的那个。
 
 ## T9 引擎事件总线 + 输入映射
 - [ ] `sisf-event/src/bus.rs`：`EngineEvent{Action,Key{code,kind,ch},Pointer{kind,pos,button,delta},Lifecycle,Custom(u32,serde_json::Value)}` + `EngineBus{push,drain}`。验收：drain 顺序单测。

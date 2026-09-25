@@ -448,6 +448,17 @@ impl Sprite {
 }
 
 impl SpriteArena {
+    /// 每拍开头调一次：把全场精灵的 `prev_pos` 收拢到 `pos`。
+    ///
+    /// 必须在任何移动之前调（`App::tick` 的第一行），否则这一拍的位移会被当场抹掉。停拍
+    /// 不推进 `prev_pos` 会让 [`Sprite::interpolated`] 把最后一跳重播一遍，见
+    /// [`Sprite::begin_tick`]。
+    pub fn begin_tick(&mut self) {
+        for (_, sprite) in self.iter_live_mut() {
+            sprite.begin_tick();
+        }
+    }
+
     /// 统一推进点：每 tick 调一次，把换掉的帧写回各精灵的 `src`。
     ///
     /// 返回**本拍换帧的精灵数**（0 = 全场静止，是"这一拍没白干"的直观读数）。
@@ -741,6 +752,32 @@ mod tests {
         assert_eq!(
             arena.get(walking).unwrap().src,
             Rect::new(24.0, 0.0, 24.0, 32.0)
+        );
+    }
+
+    /// 收拢是"全场"的：每个活精灵的 `prev_pos` 都被拉到 `pos`，本拍真正动了的那个照旧留痕。
+    #[test]
+    fn arena_begin_tick_folds_every_live_sprite() {
+        let mut arena = SpriteArena::new();
+        let moved = arena.spawn(Sprite::default());
+        let still = arena.spawn(Sprite::default());
+        for h in [moved, still] {
+            let s = arena.get_mut(h).unwrap();
+            s.teleport(Vec2::new(8.0, 8.0));
+            s.set_pos(Vec2::new(16.0, 8.0));
+            assert_ne!(s.interpolated(0.0), s.pos, "上一跳还该看得见");
+        }
+        arena.begin_tick();
+        arena.get_mut(moved).unwrap().set_pos(Vec2::new(24.0, 8.0));
+
+        let still = arena.get(still).unwrap();
+        assert_eq!(still.prev_pos, still.pos, "没动的精灵收拢成一点");
+        assert_eq!(still.interpolated(0.0), still.interpolated(0.75));
+        let moved = arena.get(moved).unwrap();
+        assert_eq!(
+            (moved.prev_pos, moved.pos),
+            (Vec2::new(16.0, 8.0), Vec2::new(24.0, 8.0)),
+            "收拢不能抹掉本拍的位移"
         );
     }
 

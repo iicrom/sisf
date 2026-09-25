@@ -166,6 +166,10 @@ pub struct Sprite {
     /// [`Sprite::set_pos`]（它把旧的 `pos` 挪进本字段）。不想被插值的跳变（传送、
     /// 读档、路线起点）一律走 [`Sprite::teleport`]：一次改两个值。直接写 `pos`
     /// 是最坏的那种写法 —— 本字段会停在原地，精灵从出生点一路"滑"过来。
+    ///
+    /// **不变量：本字段是"上一拍的位置"，所以没动的拍也得推进它** —— 每拍开头对全场精灵调
+    /// 一次 [`Sprite::begin_tick`]（[`crate::arena::SpriteArena::begin_tick`]），否则停拍会把最后一跳反复
+    /// 重播（角色原地来回弹）。
     pub prev_pos: Vec2,
     /// 逐轴缩放（可为负，与 `flip_*` 叠加）。
     pub scale: Vec2,
@@ -258,6 +262,16 @@ impl Sprite {
         self.pos = pos;
     }
 
+    /// 每拍开头收拢一次：`prev_pos = pos`。
+    ///
+    /// [`Sprite::prev_pos`] 的含义是"上一拍的位置"，但只有 [`Sprite::set_pos`] 会推进它 ——
+    /// 于是"这一拍没动"的精灵（走一格后的停拍、`MoveRoute` 的 `Wait`、撞墙被作废）会让
+    /// `prev_pos` 永远停在最后一跳上，被 `alpha` 的 `0→1` 一遍遍重播：画面退回去一步再走
+    /// 回来。收拢之后，没动就没有可播的位移。每拍调一次，且必须在任何移动之前。
+    pub fn begin_tick(&mut self) {
+        self.prev_pos = self.pos;
+    }
+
     /// `prev_pos`/`pos` 按 `alpha` 取点（`collect` 的落点）。
     pub fn interpolated(&self, alpha: f32) -> Vec2 {
         self.prev_pos.lerp(self.pos, alpha)
@@ -322,5 +336,30 @@ mod tests {
         // 传送之后中途取点也还在原地（两值相同 ⇒ 插值退化成常量）。
         s.teleport(Vec2::new(100.0, 100.0));
         assert_eq!(s.interpolated(0.0), s.interpolated(0.5));
+    }
+
+    /// 停拍不变量：`begin_tick` 之后的"没动的那一拍"没有任何可播位移 —— 否则
+    /// `interpolated(alpha)` 会把上一跳来回重播（角色原地来回弹）。
+    #[test]
+    fn begin_tick_erases_a_hop_that_the_new_tick_does_not_repeat() {
+        let mut s = Sprite::default();
+        s.teleport(Vec2::new(10.0, 4.0));
+        s.set_pos(Vec2::new(12.0, 4.0));
+        // 动的那一拍：中途取点确实落在两点之间。
+        assert_eq!(s.interpolated(0.0), Vec2::new(10.0, 4.0));
+        assert_eq!(s.interpolated(0.5), Vec2::new(11.0, 4.0));
+        // 下一拍开头收拢，且这一拍没有再动 ⇒ alpha 走遍 0→1 也只画在一个点上。
+        s.begin_tick();
+        for a in [0.0, 0.18, 0.5, 0.91, 1.0] {
+            assert_eq!(
+                s.interpolated(a),
+                Vec2::new(12.0, 4.0),
+                "alpha {a} 重播了最后一跳"
+            );
+        }
+        // 收拢不能吃掉本拍的位移：begin_tick 之后再 set_pos 照旧留痕。
+        s.set_pos(Vec2::new(14.0, 4.0));
+        assert_eq!(s.prev_pos, Vec2::new(12.0, 4.0));
+        assert_eq!(s.interpolated(0.5), Vec2::new(13.0, 4.0));
     }
 }

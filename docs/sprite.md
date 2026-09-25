@@ -95,20 +95,31 @@ layer、再按图集页、再按 blend 分批次，`z` 只在同批次内决定�
 （每格一次），整条路线还慢一拍一格（`tile/(ceil(tile/speed)+1)` 而非声明值）。不变量：
 **每个被 `TickClock` 消耗的周期都必须推进 `prev_pos`/`pos`**。
 
+**但这条不变量不该由每个消费者各自守住 —— 它由 `SpriteArena::begin_tick` 统一兜住**。
+只有 `set_pos` 会推进 `prev_pos`，于是"这一拍没动"的精灵（走一格后的停拍、`RouteNode::Wait`、
+撞墙被作废）会把 `prev_pos` 永远留在最后一跳上，被 `alpha` 的 `0→1` 一遍遍重播。收尾拍修掉之后
+剩下的这一半才是第四次报回的抖动（"红色人物移动后人物抖，玩家角色移动后地图抖"）：NPC 在 `Wait`
+里来回弹，玩家角色一站定，被相机带着的就是整张地图。**约定：`App::tick` 的第一行调一次
+`arena.begin_tick()`**（把全场 `prev_pos` 收拢成 `pos`），顺序有讲究 —— `tick_anims` 在拍尾，
+那时收拢等于把本拍位移当场抹掉。位移本身仍走 `set_pos`/`teleport`，直接写 `pos` 依然禁用。
+
 **插值点只有一个消费者是不够的：相机也得看见它**。`collect_at(view, alpha, ..)` 把精灵画在
 `Sprite::interpolated(alpha)`，而跟随相机是 viewport 栈上的一层、投影在 `draw` 之前就烘完了 ⇒
 相机必须取同一个 `interpolated(alpha)`（`App::prepare`，见 `docs/platforms.md`）。放 `tick` 末
-= 相机钉拍尾 ⇒ 角色每拍相对地图回拽 `(1 - alpha) × 每拍位移`，一步之内来回跳（站着不动时
-`prev_pos == pos`，反倒看不出来）；这是逐拍位移
+= 相机钉拍尾 ⇒ 角色每拍相对地图回拽 `(1 - alpha) × 每拍位移`，一步之内来回跳；这是逐拍位移
 （`MoveRoute::walk`）独有的坑，静止的世界图块 `prev_pos == pos`，插值对它们是恒等的。
 但"同一个插值点"要把 `alpha` 折到像素格点上（示例里的 `lattice_alpha`）：精灵与地图都按
 `interpolated(alpha)` 的**小数**位置画出来时，抖的就换成整张地图了 —— 线性采样下硬边缘被摊到
 两个纹素之间、摊法每帧再变，判据与量法见 `docs/platforms.md`。
 
-验收：`anim.rs` 14 条（两条图样的朝向行表与四向帧索引、静止不换帧、短帧表夹住不外跑）、
-`task.rs` 15 条（补间按拍回调、撞墙、wait 队列、`MoveTo` 逐轴、`Jump` 跨缝、`FacingLock`）、
-`timing.rs` 6 条（不足一周期不跑逻辑、`alpha` = 余量、尖峰只补 5 拍并记 `dropped`、
-`reset` 冻结）；端到端在 `examples/tiled_map.rs`（三层 tilemap + 键盘四向行走 + 事件格碰撞）。
+验收：`anim.rs` 15 条（两条图样的朝向行表与四向帧索引、静止不换帧、短帧表夹住不外跑、
+`begin_tick` 收拢全场）、`sprite.rs` 5 条（默认值、字段可原地写、`Tone::Matrix` 无通路、
+`set_pos`/`teleport` 的插值对、`begin_tick` 抹掉的是"上一跳"而不是"本拍位移"）、
+`task.rs` 16 条（补间按拍回调、撞墙、wait 队列、`MoveTo` 逐轴、
+`Jump` 跨缝、`FacingLock`、`Wait` 期间画出的点恒定）、`timing.rs` 6 条（不足一周期不跑逻辑、
+`alpha` = 余量、尖峰只补 5 拍并记 `dropped`、`reset` 冻结）；端到端在 `examples/tiled_map.rs`
+（三层 tilemap + 键盘四向行走 + 事件格碰撞，外加"松手后相机逐帧不动"与 4 方向 × 2 倍率 × 6 节拍
+的相机不回退穷举）。
 
 ## golden
 

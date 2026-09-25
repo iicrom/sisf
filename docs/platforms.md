@@ -55,7 +55,7 @@ cargo run -p sisf --example hello_window
 拍尾、角色却画在 `Sprite::interpolated(alpha)` 上，角色相对地图每拍被拽回
 `(1 - alpha) × 每拍位移` 像素再弹回来 —— `examples/tiled_map.rs` 那条"人物一直在抖动"就是这么
 来的（`SPEED = 2` 时最多差 2 个虚拟像素；只在走位期间出现，但 alpha 每帧都变 ⇒ 一步之内来回
-跳，站着不动时 `prev_pos == pos` 反而看不出来）；推到 `draw` 里 = 永远慢一帧。
+跳）；推到 `draw` 里 = 永远慢一帧。
 `App::prepare(alpha, ctx)` 就是为这一刻加的：`alpha` 与本帧 `draw` 同值，而栈还没烘。
 钉成单测 `the_following_camera_shares_the_hero_s_interpolation_phase`（含对照组：拍尾相机在
 alpha 0/0.5 下的错位恰好是 2/1 虚拟像素）。
@@ -101,6 +101,21 @@ alpha 0/0.5 下的错位恰好是 2/1 虚拟像素）。
 钉成单测 `the_camera_tracks_the_ideal_scroll_under_a_jittery_frame_rate`。
 残余的逐帧位移量仍有 1~3px 的散布，那是软件 WebGL 下 54~56fps 的节拍噪声（12/18/24ms），
 不是位置错误：位置单调、误差 ≤2px。
+
+**修完收尾拍仍然"红色人物移动后人物抖，玩家角色移动后地图抖"（T8 复盘第四步）**：同一条不变量
+只在一个消费者身上成立是不够的 —— `prev_pos` 只被 `set_pos` 推进，所以**任何"这一拍没动"的拍**
+都还在重播最后一跳：玩家走完一格松手的停拍、NPC `RouteNode::Wait` 的每一拍、撞墙被作废的剩余格数。
+停拍里 `interpolated(alpha)` 沿刚才那一格来回走 ±一格，被相机放大成"整张地图朝移动方向来回弹"，
+形态与第三次报回的一模一样 —— 差别只在**静止时可见**（前三步的判据全在"走位期间"取样，
+静止段一直没被看过，所以本地穷举 4 方向 × 2 倍率 × 6 节拍都判"通过"）。
+判据要按"每次启动/每个阶段"分段，而且要包含停手相：
+`standing_still_must_not_replay_the_last_hop`（165Hz 恒定节拍，松手后逐帧读数必须全等）、
+`the_camera_tracks_the_ideal_scroll_under_a_jittery_frame_rate` 的松手相（乱节拍，先倒回可滚动
+区间再松手 —— 顶到地图边缘时怎么弹都读数不变，是白测）、
+`a_wait_node_draws_the_same_point_every_frame`（路线层：`Wait` 期间 `interpolated(0/0.5/1)` 恒定）、
+`begin_tick_erases_a_hop_that_the_new_tick_does_not_repeat` + `arena_begin_tick_folds_every_live_sprite`
+（数据层）。修法不是让每个游戏逻辑各自记得推进，而是 `App::tick` 第一行统一
+`arena.begin_tick()`（见 `docs/sprite.md`）。
 
 > 呈现验证提示：Windows 上若显卡走硬件覆盖合成（MPO / flip-model），`BitBlt`/`PrintWindow`
 > 抓到的客户区可能是白色占位，而屏幕上实际有内容。因此"清屏色是否正确"由
