@@ -1,0 +1,36 @@
+// T10 验收事件：选项 → 分支 → 变量/开关，外加一次 `Animate` 与一条走到底的 `Custom`。
+//
+// 这份文件同时是"清单字面量真的能写成磁盘格式"的证据：`examples/dialog_demo.rs` 的
+// `events_compile` 单测把它连同另两份一起 `EventDef::from_ron` + `compile`，字段名与
+// `command.rs` 的变体一一对应（`Option` 字段可以省，`RouteSpec` 的三个字段不可以）。
+(
+    name: "well",
+    pages: [
+        [
+            ShowText(
+                speaker: Some("井"),
+                body: "井口有光在动。\nThe well is no deeper than it looks.",
+                choices: ["探头去看", "回村说一声"],
+                result: Some(Int(5)),
+                cursor_se: Some((name: "tone_1s.wav", gain: 0.45, fade_in: 0.0)),
+                allow_cancel: false,
+            ),
+            If(
+                cond: Cmp(lhs: Slot(Int(5)), op: Eq, rhs: Lit(0)),
+                then: [
+                    PlaySe((name: "tone_1s.wav", gain: 0.9, fade_in: 0.0)),
+                    // 井沿抖 12 拍，`wait: true` ⇒ 事件等它抖完才继续说话。
+                    Animate(actor: 2, effect: Shake(px: 3.0, frames: 12), wait: true),
+                    ShowText(body: "水面晃了晃，光碎成一片。什么也没有。", cursor_se: None),
+                    SetVar(slot: Switch(2), op: Set, value: Lit(1)),
+                ],
+                else: [
+                    ShowText(body: "你转身回村。井在身后继续亮着。", cursor_se: None),
+                    SetVar(slot: Var("answer"), op: Set, value: Lit(1)),
+                    // 这台构建没装脚本后端 ⇒ 虚拟机登记一条告警，HUD 第三行把它说出来。
+                    Custom("dialog_demo.transfer", [Int(3), Text("村口")]),
+                ],
+            ),
+        ],
+    ],
+)

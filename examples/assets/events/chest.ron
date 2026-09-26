@@ -1,0 +1,36 @@
+// T10 验收事件：屏幕淡入淡出 + `Jump{page}` 翻页（RPG Maker 的"执行内容 → 翻页"）。
+(
+    name: "chest",
+    pages: [
+        [
+            ShowText(
+                speaker: Some("宝箱"),
+                body: "锁扣上缠着三层铁。",
+                choices: ["撬开它", "走开"],
+                result: Some(Int(6)),
+                cursor_se: Some((name: "tone_1s.wav", gain: 0.45, fade_in: 0.0)),
+                allow_cancel: true,
+            ),
+            If(
+                cond: Cmp(lhs: Slot(Int(6)), op: Eq, rhs: Lit(0)),
+                then: [
+                    PlaySe((name: "tone_1s.wav", gain: 1.0, fade_in: 0.0)),
+                    Animate(actor: 3, effect: Flash(frames: 12), wait: true),
+                    SetVar(slot: Switch(1), op: Set, value: Lit(1)),
+                    // 黑幕压满 16 拍（阻塞），说话，再淡回来 —— 换场景那一类演出就这么拼。
+                    Fade(target: Screen, frames: 16, out: true),
+                    ShowText(body: "锁扣弹开了。里面是空的，只有一张当铺票。", cursor_se: None),
+                    Fade(target: Screen, frames: 16, out: false),
+                    // 翻页：本事件的执行内容从此换成第 1 页，接着往下跑的就是它。
+                    Jump(page: 1),
+                ],
+                else: [],
+            ),
+            ShowText(body: "（它还在原地。你没碰它。）", cursor_se: None),
+        ],
+        [
+            ShowText(body: "空宝箱。锁扣落在地上，谁也打不开了。", cursor_se: None),
+            Animate(actor: 3, effect: Fade(to: 0.3, frames: 24), wait: false),
+        ],
+    ],
+)

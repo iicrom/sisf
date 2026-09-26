@@ -7,3 +7,6 @@ tone_2s.ogg
 tone_1s.wav
 tone_1s.mp3
 jingle.mid
+events/well.ron
+events/chest.ron
+events/npc.ron

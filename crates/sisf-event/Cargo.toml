@@ -7,6 +7,7 @@ description = "引擎事件总线（EngineEvent）与游戏事件解释器（Com
 
 [dependencies]
 sisf-sprite.workspace = true
+sisf-asset.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ron.workspace = true

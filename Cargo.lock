@@ -2329,6 +2329,7 @@ dependencies = [
  "ron",
  "serde",
  "serde_json",
+ "sisf-asset",
  "sisf-sprite",
  "thiserror 2.0.20",
 ]

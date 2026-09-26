@@ -155,8 +155,8 @@ T6 起装箱四周留 `GUTTER = 1px` 复制边（`AtlasLayout` 的 `upload` 矩�
 像素）。**基线因此重写**：`cargo xtask golden --bless` 后 `sprite_scene.png` 的格边由
 "248 一类的混合值"变成干净的 255，语义断言一条没改。
 
-`Bitmap` 的 `filter: Linear|Nearest` 双 sampler 仍然没做 —— 像素风要不要最近点采样是 T10
-的事，届时再决定，别提前铺接口。
+`Bitmap` 的 `filter: Linear|Nearest` 双 sampler **不做**（T10 已答，理由与"哪一天该重开这条"
+见 `docs/events.md` §挂账的回答）。
 
 ## T5 与清单的差
 

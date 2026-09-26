@@ -1,0 +1,56 @@
+// T10 验收事件：路线（`wait: true` 阻塞）+ `InputKey` + `Loop`/`BreakLoop` + 四条音频通道 + `Erase`。
+//
+// 跑法：站到井边人南邻、面朝他按 Enter。数字键 5..9 才放行，其余数字会被 `Loop` 拦回去
+// 再问一次；答对之后 BGM/BGS 各淡 45 拍，ME 起播，最后 `Erase` 把他从世界里摘掉。
+(
+    name: "npc",
+    pages: [
+        [
+            PlayBgm((name: "tone_2s.ogg", gain: 0.5, fade_in: 400.0)),
+            PlayBgs((name: "tone_2s.ogg", gain: 0.25, fade_in: 800.0)),
+            // 他往井口走一步、停 20 拍、再走回来。`wait: true` ⇒ 事件机整条链挂在路线上。
+            // `speed: 4.0` 比玩家的 2.0 快一倍 —— 路线速度是每条自己的，不是全局的。
+            MoveRoute(
+                actor: 4,
+                route: (
+                    steps: [
+                        Turn(dir: 8),
+                        Move(dir: 8, cells: 1),
+                        Wait(frames: 20),
+                        Move(dir: 2, cells: 1),
+                    ],
+                    speed: 4.0,
+                    through: false,
+                ),
+                wait: true,
+            ),
+            ShowText(
+                speaker: Some("井边人"),
+                body: "报个数我才让开。五以上。\n(Press a digit 5-9 on the keyboard.)",
+                cursor_se: None,
+            ),
+            Loop([
+                InputKey(slot: Int(7), timeout: 0),
+                If(
+                    cond: Cmp(lhs: Slot(Int(7)), op: Ge, rhs: Lit(5)),
+                    then: [BreakLoop],
+                    else: [
+                        ShowText(
+                            speaker: Some("井边人"),
+                            body: "太小了。再报一次。",
+                            cursor_se: None,
+                        ),
+                    ],
+                ),
+            ]),
+            SetVar(slot: Var("answer"), op: Add, value: Lit(1)),
+            ShowText(speaker: Some("井边人"), body: "过去吧。井就交给你了。", cursor_se: None),
+            PlayMe((name: "tone_1s.mp3", gain: 0.6, fade_in: 0.0)),
+            Fade(target: Bgm, frames: 45, out: true),
+            Fade(target: Bgs, frames: 45, out: true),
+            Wait(frames: 30),
+            // `Erase` 摘的是**本事件的归属 actor**（这里 = 4 号），任务、精灵、登记一起没。
+            Erase,
+        ],
+    ],
+)

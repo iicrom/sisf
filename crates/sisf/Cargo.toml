@@ -71,3 +71,12 @@ name = "tiled_map"
 path = "../../examples/tiled_map.rs"
 test = true
 required-features = ["image"]
+
+# 事件虚拟机 + 三份 `assets/events/*.ron`（T10）。`image` 是同 `tiled_map` 的精灵/上传链，
+# ogg/mp3/wav 则是事件表里那三种音频（BGM/BGS/ME/SE 各用一条链才验得出"四条通道都通"）。
+# `test = true`：验收跑的是事件表真的编得过 + 消息窗布局数学。
+[[example]]
+name = "dialog_demo"
+path = "../../examples/dialog_demo.rs"
+test = true
+required-features = ["image", "ogg", "mp3", "wav"]
