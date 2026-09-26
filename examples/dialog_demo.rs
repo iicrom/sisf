@@ -31,7 +31,8 @@
 //!   事件表取自 `examples/assets/events/`（三个 `DirProvider`）。
 //! - wasm：`cargo xtask web dialog_demo` 后访问 `http://127.0.0.1:8080/?ex=dialog_demo&wgl`
 //!   （`web/assets/events/*.ron` 是 `examples/assets/events/*.ron` 的副本：桌面走目录
-//!   provider、浏览器走 `fetch`，内容必须一致，改一处要改两处）
+//!   provider、浏览器走 `fetch`，内容必须一致，改一处要改两处。中文**不在**那份清单里 ——
+//!   wasm 没有系统字体，8MB 的 CJK 也不入库，开局由 `fetch_cjk` 从 CDN 取一次）
 //! - 单测：`cargo test -p sisf --example dialog_demo`（事件表真的编得过、翻页条件、
 //!   阻挡表、消息窗布局数学）
 //!
@@ -50,12 +51,19 @@
 //!    一次，按 5..9 才放行（`InputKey` 只认 `Press`，按住连发的 `Repeat` 不算第二个字符），
 //!    最后 ME 起播、BGM/BGS 淡出、`Erase` 把他从世界里摘掉（HUD 的 actor 数跟着少一）。
 //! 5. 全程 HUD 第一行显示上一拍的结论（`idle`/`hold text`/`hold task`/`over-budget`…，
-//!    全 ASCII —— 浏览器里那份 Inter 没有 CJK，状态行读不出来就等于没测）：
+//!    全 ASCII —— 状态行是给游戏侧 `match`、给像素探针当键用的标识，而且 CDN 挂掉那一拍
+//!    中文正好读不出来，状态行必须仍然说得清自己）：
 //!    **按着方向键狂按也不会看到 `over`** —— 超预算保护只在指令边界出现，死循环才会。
 //! 6. 窗口拉大拉小：消息窗与黑幕都在 UI 层（viewport 栈第 1 层），不会跟着世界层抖。
+//! 7. 中文：台词要有笔画而不是清一色方块。HUD 第一行末尾的 `font …` 就是答案 ——
+//!    `cjk ok Noto Sans SC+Inter` = CDN 那份到货并注册上了；`cjk MISSING` = 取不到或解
+//!    不出，中文会是方块（拉丁照常，因为 Inter 是单独注册的那一份）；桌面恒
+//!    `cjk system Inter`，中文由系统字体兜。字体族定形前**一个字都不画**，所以开局只有
+//!    色块，那是正常的而不是卡住。
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 #[cfg(target_arch = "wasm32")]
@@ -122,7 +130,18 @@ const HERO_AT: (i32, i32) = (7, 9);
 const EVENTS: [&str; 3] = ["events/well.ron", "events/chest.ron", "events/npc.ron"];
 
 const FONT: &str = "Inter-Regular.ttf";
-/// wasm 预取清单：字体 + 三份事件表 + 三份音频（`web/assets/` 下的同名文件）。
+/// wasm 那份 CJK 在 VFS 里的键（**不在** [`MANIFEST`] 里：清单走本站 `assets/`，它走 CDN）。
+#[cfg(target_arch = "wasm32")]
+const CJK: &str = "NotoSansSC-Regular.otf";
+/// 运行期从 CDN 取的中文轮廓（约 8 MB，**不入仓**）。三条选型理由：
+/// - OFL 授权，且是全字库整包（不是只盖住本示例那几十个字的子集）；
+/// - OTF 而不是 woff2 —— `FontBundle` 读的是 ttf/otf（`docs/text.md`）；
+/// - jsDelivr 的 `/gh/` 带 `Access-Control-Allow-Origin: *`，钉 SHA 而不是 `main`
+///   （分支会漂，漂了就是一版"今天还能显示中文"的验收）。
+#[cfg(target_arch = "wasm32")]
+const CJK_URL: &str = "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/SubsetOTF/SC/NotoSansSC-Regular.otf";
+/// wasm 预取清单：字体 + 三份事件表 + 三份音频（`web/assets/` 下的同名文件，
+/// 内容与 `web/assets/manifest.txt` 重合）。
 #[cfg(target_arch = "wasm32")]
 const MANIFEST: &str = "Inter-Regular.ttf\nevents/well.ron\nevents/chest.ron\nevents/npc.ron\n\
                         tone_2s.ogg\ntone_1s.wav\ntone_1s.mp3\n";
@@ -229,16 +248,64 @@ fn choice_rows_fit(n: usize) -> bool {
 
 // ---------------------------------------------------------------- 资源
 
+/// CDN 那份 CJK 的到货状态。为什么要专门有这么一个东西：`load_font` 得等一份**异步**的
+/// 字体，而一份永远不来的请求不能把拉丁一起拖死 —— 所以"结束了但没有"必须是一个比
+/// "还在飞"更可分辨的状态。四种结局都进 HUD（方块不解释自己）。
+#[derive(Clone)]
+struct Cjk(Arc<AtomicU8>);
+
+const CJK_PENDING: u8 = 0;
+/// 桌面：这一趟 fetch 根本不存在，中文由系统字体兜（`docs/text.md` 平台矩阵）。
+const CJK_SYSTEM: u8 = 1;
+/// 字节已在清单里，等着注册。
+const CJK_ARRIVED: u8 = 2;
+/// 拿不到：请求挂了、响应是空的、或者那字节解不出 face。中文会是方块。
+const CJK_NONE: u8 = 3;
+
+impl Cjk {
+    fn new() -> Self {
+        #[cfg(target_arch = "wasm32")]
+        let start = CJK_PENDING;
+        #[cfg(not(target_arch = "wasm32"))]
+        let start = CJK_SYSTEM;
+        Self(Arc::new(AtomicU8::new(start)))
+    }
+
+    fn state(&self) -> u8 {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// 只有 wasm 会改写它（桌面的 [`CJK_SYSTEM`] 在 `new` 里一次定形）。
+    #[cfg(target_arch = "wasm32")]
+    fn set(&self, s: u8) {
+        self.0.store(s, Ordering::Relaxed);
+    }
+
+    /// HUD 的 `font …` 段。四种结局都读得出来：中文排成方块这件事本身不解释自己。
+    fn label(&self) -> &'static str {
+        match self.state() {
+            CJK_PENDING => "cjk pending",
+            CJK_SYSTEM => "cjk system",
+            CJK_ARRIVED => "cjk ok",
+            CJK_NONE => "cjk MISSING",
+            _ => "cjk ?",
+        }
+    }
+}
+
 /// VFS + 读表状态。音频样本的缓存不在这里（在 [`GameAudio`]，那里才是"只解一次"的现场）。
 struct Assets {
     vfs: Vfs,
     font_loaded: bool,
     /// 最近一次读事件表缺了哪个（wasm 首帧清单还在飞）。
     missing: String,
+    /// CDN 那份 CJK 到哪一步了（见 [`Cjk`]）。
+    cjk: Cjk,
 }
 
 impl Assets {
     fn new() -> Self {
+        let cjk = Cjk::new();
         #[cfg(not(target_arch = "wasm32"))]
         let mut vfs = Vfs::new();
         #[cfg(not(target_arch = "wasm32"))]
@@ -258,6 +325,8 @@ impl Assets {
         let vfs = {
             let manifest = Arc::new(WebManifest::new(MANIFEST));
             prefetch(&manifest);
+            // 中文那份不排在清单里：清单只从本站 `assets/` 抓，而 8MB 的字体不入库。
+            fetch_cjk(&manifest, &cjk);
             let mut vfs = Vfs::new();
             vfs.register(Box::new(SharedManifest(manifest)));
             vfs
@@ -266,6 +335,7 @@ impl Assets {
             vfs,
             font_loaded: false,
             missing: String::from("未尝试"),
+            cjk,
         }
     }
 
@@ -312,9 +382,58 @@ fn prefetch(manifest: &Arc<WebManifest>) {
     }
 }
 
+/// wasm：从 CDN 取 [`CJK`] 那份中文字体，成字节后灌进清单（`insert` 收清单外的键，
+/// 见 `sisf-asset/src/vfs.rs` 的"运行期追加"）。
+///
+/// 两头都要说话：到货说字节数，取不到说原因，并把 [`CJK_NONE`] 写回状态。少了后者，
+/// `load_font` 会一直等一份永远不来的字体，把本来能显示的拉丁一起拖死。
+#[cfg(target_arch = "wasm32")]
+fn fetch_cjk(manifest: &Arc<WebManifest>, cjk: &Cjk) {
+    use sisf::app::{js_sys, wasm_bindgen_futures, web_sys};
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let m = Arc::clone(manifest);
+    let c = cjk.clone();
+    wasm_bindgen_futures::spawn_local(async move {
+        let outcome: Result<Vec<u8>, String> = async {
+            let response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(CJK_URL))
+                .await
+                .map_err(|e| format!("{e:?}"))?;
+            let response = web_sys::Response::from(response);
+            // 404 页也会 resolve 出一个非空响应，而它解不出 face —— 那时候话说成
+            // "字节解析不出任何 face"，排查的人会去查字体格式，而真正的错是 URL。
+            if !response.ok() {
+                return Err(format!("HTTP {}", response.status()));
+            }
+            let body = response.array_buffer().map_err(|e| format!("{e:?}"))?;
+            let buffer = wasm_bindgen_futures::JsFuture::from(body)
+                .await
+                .map_err(|e| format!("{e:?}"))?;
+            Ok(js_sys::Uint8Array::new(&buffer).to_vec())
+        }
+        .await;
+        match outcome {
+            Ok(bytes) if !bytes.is_empty() => {
+                // 字节数要说得出：这一趟是本示例唯一新增的网络依赖。
+                platform::log_info(&format!("[dialog_demo] CJK 到货 {} 字节", bytes.len()));
+                m.insert(&vpath(CJK), bytes);
+                c.set(CJK_ARRIVED);
+            }
+            Ok(_) => {
+                web_sys::console::log_1(&format!("{CJK_URL} 响应是空的").into());
+                c.set(CJK_NONE);
+            }
+            Err(why) => {
+                web_sys::console::log_1(&format!("取 {CJK_URL} 失败: {why}").into());
+                c.set(CJK_NONE);
+            }
+        }
+    });
+}
+
 #[cfg(target_arch = "wasm32")]
 struct SharedManifest(Arc<WebManifest>);
-
 #[cfg(target_arch = "wasm32")]
 impl VfsProvider for SharedManifest {
     fn read(&self, p: &VfsPath) -> Option<Vec<u8>> {
@@ -522,6 +641,8 @@ struct DialogDemo {
     last: String,
     /// 攒下没打印的告警条数（打印见 `report_warnings`）。
     warnings: u32,
+    /// 装好的自带字体族名（HUD 第一行；`load_font` 之前是空串）。
+    font: String,
 }
 
 impl DialogDemo {
@@ -562,6 +683,7 @@ impl DialogDemo {
             pushed_ui: false,
             last: String::from("idle"),
             warnings: 0,
+            font: String::new(),
         }
     }
 
@@ -580,17 +702,48 @@ impl DialogDemo {
     }
 
     /// 自带字体到货后换上（wasm 没有系统字体，消息窗全靠它）。
+    ///
+    /// 注册顺序 = 桌面的顺序：**CJK 先、Inter 最后**。[`FontBundle::register_bytes`] 把
+    /// 最后注册的那份设成 sans/serif 默认族，所以拉丁仍然出自 Inter（与桌面同源），中文
+    /// 则靠 per-glyph 回退落到那份 Noto 上 —— 与"系统字体兜 CJK"是同一套机制，只是字体
+    /// 由谁提供不同（`docs/text.md` 平台矩阵）。
+    ///
+    /// [`CJK_PENDING`] 时整批再等一拍：先装 Inter 会让中文永远停在方块，而中途再换一次
+    /// 字体族会在覆盖率图集里串字（`examples/windows.rs` 同一条 —— 换之前必须一个字都
+    /// 没画过）。等的是"这件事结束了"而不是"字体到了"，见 [`Cjk`]。
     fn load_font(&mut self) {
-        if self.assets.font_loaded {
+        if self.assets.font_loaded || self.assets.cjk.state() == CJK_PENDING {
             return;
         }
-        let Some(bytes) = self.assets.vfs.read(&vpath(FONT)) else {
+        let Some(inter) = self.assets.vfs.read(&vpath(FONT)) else {
             return;
         };
-        let bundle = FontBundle::from_bytes(&bytes);
+        let mut bundle = FontBundle::system();
+        let mut named: Vec<String> = Vec::new();
+        #[cfg(target_arch = "wasm32")]
+        if self.assets.cjk.state() == CJK_ARRIVED
+            // 只读一次：这份字节有 8MB，而 `Vfs::read` 是拷贝出来的。
+            && let Some(bytes) = self.assets.vfs.read(&vpath(CJK))
+        {
+            match bundle.register_bytes(&bytes) {
+                Ok(family) => named.push(family),
+                // 解不出 face ⇒ 与"根本没到货"同一个下场，但原因要分开说：那 URL 给的
+                // 可能压根不是字体（`fetch_cjk` 只看 HTTP 状态，看不穿一份伪装成 200 的页）。
+                Err(why) => {
+                    self.assets.cjk.set(CJK_NONE);
+                    platform::log_info(&format!("[dialog_demo] CJK 用不了: {why}"));
+                }
+            }
+        }
+        match bundle.register_bytes(&inter) {
+            Ok(family) => named.push(family),
+            Err(why) => platform::log_info(&format!("[dialog_demo] 自带字体用不了: {why}")),
+        }
+        self.font = named.join("+");
         platform::log_info(&format!(
-            "[dialog_demo] 字体 {:?}（face {}）",
-            bundle.family(),
+            "[dialog_demo] 字体 {}（{}，face {}）",
+            self.font,
+            self.assets.cjk.label(),
             bundle.face_count()
         ));
         *self.text.bundle_mut() = bundle;
@@ -600,10 +753,12 @@ impl DialogDemo {
     fn hud_lines(&self) -> [String; 3] {
         [
             format!(
-                "tick {} · {} · {}",
+                "tick {} · {} · {} · font {} {}",
                 self.ticks,
                 self.last,
-                self.vm_prompt_kind()
+                self.vm_prompt_kind(),
+                self.assets.cjk.label(),
+                self.font,
             ),
             format!(
                 "actors {} · ui pushes {} · {} · warn {}",
@@ -847,7 +1002,11 @@ impl App for DialogDemo {
                 [0.0, 0.0, 0.0, dim],
             );
         }
-        if let Some(p) = self.ui.prompt.clone() {
+        // 字体没到货就整个窗都不画：覆盖率图集的 `CacheKey` 里带着 face 序号，中途换字体
+        // 族会让旧页被新 face 命中 —— 那就是串字（`examples/windows.rs` 同一条）。
+        if let Some(p) = self.ui.prompt.clone()
+            && self.assets.font_loaded
+        {
             quad(renderer, UI_LAYER, 1, WIN, WINDOW_BG);
             let style = TextStyle::new(13.0).aligned(Align::Left);
             // 窗高是写死的 ⇒ 装不下的选项宁可不画，也不要溢出到窗框外面去。
@@ -876,15 +1035,18 @@ impl App for DialogDemo {
                     .draw_text_at(renderer, r, choice, &style, INK, UI_LAYER);
             }
         }
-        for (i, line) in self.hud_lines().iter().enumerate() {
-            self.text.draw_text_at(
-                renderer,
-                [8.0, 6.0 + i as f32 * 18.0, vw - 16.0, 18.0],
-                line,
-                &TextStyle::new(13.0).aligned(Align::Left),
-                [1.0, 1.0, 1.0, 0.9],
-                UI_LAYER,
-            );
+        // 同一条理由：状态行也是字，没字体族定形之前一个字都不落图集。
+        if self.assets.font_loaded {
+            for (i, line) in self.hud_lines().iter().enumerate() {
+                self.text.draw_text_at(
+                    renderer,
+                    [8.0, 6.0 + i as f32 * 18.0, vw - 16.0, 18.0],
+                    line,
+                    &TextStyle::new(13.0).aligned(Align::Left),
+                    [1.0, 1.0, 1.0, 0.9],
+                    UI_LAYER,
+                );
+            }
         }
         self.stats = renderer.stats();
         self.text.sync(renderer);
@@ -893,9 +1055,9 @@ impl App for DialogDemo {
 
 /// 上一拍的结论 → HUD 上那一行短句。
 ///
-/// 状态行刻意全 ASCII：浏览器里只有仓库自带那份 Inter（拉丁字形，见 `docs/text.md`），
-/// 中文在这块画布上是一排方块 —— 而"事件机现在挂在什么上面"正是 wasm 手测唯一要读的
-/// 东西。台词本身仍是中文（那是内容，缺字形就缺字形，桌面有系统字体兜着）。
+/// 状态行刻意全 ASCII：这一行最需要出现的那一刻，是字体还没到货、或者运行期那份 CJK 根本
+/// 取不到的那一刻（`docs/text.md` 平台矩阵），那时中文在这块画布上就是一排方块 —— 而"事件机
+/// 现在挂在什么上面"正是 wasm 手测唯一要读的东西。台词本身仍是中文（那是内容）。
 fn describe(status: RunnerStatus) -> String {
     match status {
         RunnerStatus::Idle { executed } => format!("idle {executed}"),

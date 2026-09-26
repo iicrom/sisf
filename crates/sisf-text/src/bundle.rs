@@ -6,8 +6,10 @@
 //!
 //! 平台差异（见 `docs/text.md`）：
 //! - 桌面/Android：`FontSystem::new()` 会扫系统字体，中文等 CJK 由系统字体兜底。
-//! - wasm32：系统字体不存在。自带字体字节是唯一来源；两者都没有时字形直接不出现
-//!   （不放空实现、也不假装成功——回退原因仍在 `FontBundle::fallback()` 里）。
+//! - wasm32：系统字体不存在，CJK 由**宿主在运行期补**（示例从 CDN `fetch` 一份再
+//!   `register_bytes`，见 `docs/text.md` 平台矩阵）—— 引擎不管那个 URL，网络归宿主。
+//!   两者都没有时字形直接不出现（不放空实现、也不假装成功——回退原因仍在
+//!   `FontBundle::fallback()` 里）。
 
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -61,7 +63,8 @@ static DEFAULT_WARN: LazyLock<WarnOnce> = LazyLock::new(WarnOnce::new);
 #[derive(Debug)]
 pub struct FontBundle {
     fonts: FontSystem,
-    /// 生效的自带字体族名（`None` = 只有系统字体）。
+    /// 生效的自带字体族名（`None` = 只有系统字体）。多份注册时是**最后**那一份，
+    /// 也就是 `sans_serif` 默认族；其余注册进来的族只作为 per-glyph 回退候选存在。
     family: Option<String>,
     /// 回退成因（`Some` = 自带字体没用上，走的是默认字体）。
     fallback: Option<FontError>,
@@ -79,10 +82,7 @@ impl FontBundle {
     pub fn from_bytes_with(bytes: &[u8], warn: &WarnOnce) -> Self {
         let mut bundle = Self::system();
         match bundle.register_bytes(bytes) {
-            Ok(name) => {
-                bundle.family = Some(name);
-                bundle
-            }
+            Ok(_) => bundle,
             Err(err) => {
                 let reason = err.to_string();
                 if warn.should_warn(&reason) {
@@ -132,6 +132,9 @@ impl FontBundle {
             .ok_or(FontError::NoFamily)?;
         self.fonts.db_mut().set_sans_serif_family(&name);
         self.fonts.db_mut().set_serif_family(&name);
+        // 默认族换成了谁，`family()` 就该说谁 —— 多份注册（拉丁 + CJK 各一份）时它是
+        // **最后**注册的那一份，与 `sans_serif` 一致，不是第一份。
+        self.family = Some(name.clone());
         Ok(name)
     }
 
@@ -222,6 +225,9 @@ mod tests {
         let before = bundle.face_count();
         assert_eq!(bundle.register_bytes(INTER).unwrap(), "Inter");
         assert!(bundle.face_count() > before);
+        // 走 `register_bytes` 这条路也要有族名可说：`family()` 是"默认族是哪一份"的
+        // 唯一出口，装载器一份一份叠上去时它不能一直停在 `None`。
+        assert_eq!(bundle.family(), Some("Inter"));
         // 最后注册的赢默认族（RPG Maker 只有一个自带字体，够用）。
         assert_eq!(bundle.register_bytes(INTER).unwrap(), "Inter");
     }

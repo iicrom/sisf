@@ -72,8 +72,8 @@ RON 里写 `None` 是合法的）；`else` 是 Rust 关键字，磁盘上叫 `el
 
 [`RunnerStatus::Suspended{reason}`] 的 `reason` 是 `"text" | "key" | "wait" | "task" | "fade"`
 （没挂起 = `Idle`）。**为什么是令牌而不是一句中文**：它是给游戏侧 `match`、给调试面板当键用的
-标识，而且浏览器里只有仓库自带那份拉丁字形（`docs/text.md`：Inter 没有 CJK）—— 中文的挂起原因
-恰好会在最需要它的 wasm 手测里读成一排方块。
+标识，而调试面板要读的那几行恰好出现在最需要它的 wasm 手测里 —— 那边中文有没有字形取决于运行期
+取没取到 CJK 字体（`docs/text.md` 平台矩阵），取不到时中文就是一排方块。
 
 ## 预算
 
@@ -160,9 +160,10 @@ QuickJS 落地时实现这三条就够了，**不必改动虚拟机一行**。�
 | `UiPort` 实现 | 游戏侧位图 | 同左 | 同左 |
 | 脚本后端 | 缺 `NullScriptBackend` | 同左 | 同左 |
 
-wasm 侧一条实测注意：**HUD 上的诊断行要 ASCII**。台词是中文（那是内容，桌面有系统字体兜着），
-但"事件机现在挂在什么上面"是 wasm 手测唯一要读的东西，缺字形就读不到。`dialog_demo` 的状态
-行因此写成 `hold key 0 · none` 这种形状。
+wasm 侧一条实测注意：**HUD 上的诊断行要 ASCII**。台词是中文（那是内容，wasm 由宿主运行期从
+CDN 取一份 CJK 字库补上，`docs/text.md` 平台矩阵），但"事件机现在挂在什么上面"是 wasm 手测
+唯一要读的东西 —— 而它最需要出现的那一刻，恰恰是字体还没到货、或者根本取不到的那一刻，那时
+中文正是方块。`dialog_demo` 的状态行因此写成 `hold key 0 · none` 这种形状。
 
 ## 挂账的回答：`Bitmap` 的 `filter: Linear|Nearest` 这一期不做
 
@@ -189,7 +190,7 @@ wasm 侧一条实测注意：**HUD 上的诊断行要 ASCII**。台词是中文�
 
 桌面（native，`./target/debug/examples/dialog_demo.exe`）起来到被掐掉为止无 panic：
 `事件 well ← events/well.ron（页 1，指令 10 条）`、`chest（页 2，12 条）`、`npc（页 1，17 条）`、
-`adapter: NVIDIA GeForce RTX 2080 Ti (DiscreteGpu, Vulkan)`、`字体 Some("Inter")（face 266）`、
+`adapter: NVIDIA GeForce RTX 2080 Ti (DiscreteGpu, Vulkan)`、`字体 Inter（cjk system，face 266）`、
 `cpal: 无输出设备（静音混音，时钟照常）`（这台机器没有输出设备，端口按契约返回告警，
 `warn` 计数为 0 说明没有指令落空）。
 
@@ -212,6 +213,12 @@ wasm 侧一条实测注意：**HUD 上的诊断行要 ASCII**。台词是中文�
   `Custom(dialog_demo.transfer)` 由单测钉住（`runner.rs` 里两条告警路径：
   `这台事件机没装脚本后端` 与 `脚本后端不认这个名字` —— DoD-4"没做的能力要说话"的
   可执行证据）。
+- 中文（T10 之后补的一账，`docs/text.md` 平台矩阵第 1 条）：`?ex=dialog_demo&wgl` 控制台
+  `CJK 到货 8331336 字节` → `字体 Noto Sans SC+Inter（cjk ok，face 2）`，HUD 的「静默」与
+  NPC 窗的「井边人 / 报个数我才让开。五以上。」都有笔画，拉丁那一行仍是 Inter。失败腿是把
+  `CJK_URL` 临时改成一个 404 再跑一遍（改回来，不入库）：`取 … 失败: HTTP 404` →
+  `字体 Inter（cjk MISSING，face 1）`，中文是方块、状态行照常、tick 继续走 —— 取不到字库
+  不是一种故障，是这条路径本来就该有的样子。
 
 ⚠️ 桌面这一腿只有"起窗口 + 无 panic + 三份表解出来"这一条弱证据，**没有肉眼复验过一整条
 NPC 链**（这一轮没有可注入的窗口焦点）。要补的清单与 wasm 那份一一对应：面朝井边人按 Enter

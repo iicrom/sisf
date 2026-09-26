@@ -64,6 +64,11 @@ draw_* ……（新字形落位、影子页变脏）…… ▶ TextEngine::sync(
 warn 一次（进程级去重表；同帧构造几十个 `Bitmap` 不该刷屏）：`Empty`（VFS 里没这个文件）、
 `Unparsable`（不是 ttf/otf）。单测三条路径都在 `bundle.rs`。
 
+多份字体可以叠加（`register_bytes`，拉丁 + CJK 各一份是常见做法）：每注册一份就把 sans/serif
+默认族换成它，所以**注册顺序有意义** —— 先 CJK 后 Inter，拉丁才仍出自 Inter，中文靠 per-glyph
+回退落到 CJK 那份。`family()` 随之说的是**最后**注册的那一份（与默认族一致，不是第一份，
+也不会在第二次注册后停在 `None` 上撒谎）；其余族只作为回退候选存在。
+
 ## 位图渲染目标与绘制会话
 
 `crates/sisf-render/src/bitmap.rs`。RGSS 的 `Bitmap` 是一等公民，所以这里直接是
@@ -185,14 +190,20 @@ T8 的两条候选里选了 **1. 光栅超采样**。全分辨率文字层（UI 
 | --- | --- | --- | --- | --- |
 | Windows / Linux（native） | ✅ | ✅ | ✅ | 系统字体兜 CJK，自带字体只管拉丁 |
 | Android（native） | ✅ 编译面 | ✅ | ✅ | `FontSystem::new()` 会扫系统字体；真机手测归 T12 一起走 |
-| wasm32 | ⚠️ 见下 | ✅ | ✅ | `cargo xtask web windows` + `?ex=windows&wgl` |
+| wasm32 | ✅ 中文靠运行期取字库 | ✅ | ✅ | `cargo xtask web windows` + `?ex=windows&wgl` |
 
-wasm 的两条硬约束（不是空实现，是平台事实）：
+wasm 的三条硬约束（不是空实现，是平台事实）：
 
 1. **没有系统字体**（fontdb 在 wasm32 上扫不到任何东西）。自带字体字节是唯一来源，
-   而仓库里那份 Inter 只有拉丁 —— 中文要 CJK 字体才有字形。打包几 MB 的 Noto 不在本阶段
-   范围内，所以 `examples/windows.rs` 把"用的哪一族 / face 数 / 回退成因"直接画在屏幕左上角，
-   手测时不必猜。
+   而仓库里那份 Inter 只有拉丁 —— 中文要 CJK 字体才有字形。8 MB 的整包不入库，
+   所以**字形来源由宿主在运行期补**：示例各自从 CDN `fetch` 一份 Noto Sans SC
+   （OFL、全字库、OTF 而非 woff2、jsDelivr `/gh/` 钉 commit SHA），塞进
+   `WebManifest`（`insert` 允许清单外的键），到货前 `Cjk` 状态是 pending、到货后
+   先注册 CJK 再注册 Inter（注册顺序 = 默认族顺序，拉丁仍出自 Inter，中文走
+   per-glyph 回退）。取不到就是中文方块 + 状态行一句 `cjk MISSING`，拉丁照常 ——
+   一份永远不来的请求不能把本来能显示的拉丁一起拖死。**引擎不管这个 URL**：
+   网络 fetch 归宿主（`crates/sisf-asset` 的约定），`FontBundle` 只多了一条
+   `register_bytes` 的调用。
 2. **`eprintln!` 在浏览器里看不见**。`FontBundle` 的回退 warn 因此只在桌面/Android 有效；
    wasm 上自查用 `FontBundle::fallback()` / `is_fallback()` / `face_count()`。
 3. **一个 face 都没有时不能把请求交给 cosmic-text**（T8e 实测）。`shape.rs` 里那句
@@ -201,6 +212,10 @@ wasm 的两条硬约束（不是空实现，是平台事实）：
    `layout_with` 先查 `db().is_empty()` 就返回空 `TextRun`（行高照常给，盒布局不塌）：
    "没字体 = 字形不出现"这条约定到这里才真的成立。断言
    `an_empty_font_system_lays_out_nothing_instead_of_trapping`（含"有字体时必须排得出字"的反向对照）。
+4. **换字体族之前一个字都不能画过**（第 1 条的运行期注册把它变成了常规路径，不再是纯启动期
+   的事）。`CacheKey` 里带 `font_key`，而 `FontSystem` 的 face 编号会随注册次序重排 ⇒ 中途换
+   bundle 会让覆盖率图集里的旧页按新编号被误读，串出别的字。示例的画法是把所有文字都 gate 在
+   `font_loaded` 之后（`examples/dialog_demo.rs` 的窗口与 HUD 都如此）。
 
 ## 能力矩阵（不支持项）
 

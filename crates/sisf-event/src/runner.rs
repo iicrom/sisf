@@ -568,8 +568,8 @@ impl EventRunner {
     /// `task`（等路线或补间）、`fade`（等淡入淡出）。
     ///
     /// 为什么是 ASCII 令牌而不是一句中文：它是给游戏侧 `match`、给调试面板当键用的**标识**，
-    /// 而且浏览器里只有仓库自带那份拉丁字形（`docs/text.md`：Inter 没有 CJK，打包 Noto 不在
-    /// 本阶段）—— 中文的挂起原因恰好会在最需要它的 wasm 手测里读成方块。
+    /// 而调试面板要读的那几行恰好出现在最需要它的 wasm 手测里 —— 那边中文有字形与否取决于
+    /// 运行期取没取到 CJK 字体（`docs/text.md` 平台矩阵），取不到时中文就是一排方块。
     fn hold_variant(&self) -> &'static str {
         match &self.hold {
             None => "none",

@@ -22,9 +22,12 @@
 //! 运行：
 //! - 桌面：`cargo run --release -p sisf --example windows`
 //! - wasm：`cargo xtask web windows` 后访问 `http://127.0.0.1:8080/?ex=windows&wgl`
-//!   （wasm 没有系统字体：拉丁来自自带 Inter，中文要有 CJK 字体才出字形，见
-//!   `docs/text.md`；debug 构建下把窗口调小些即可）
+//!   （wasm 没有系统字体：拉丁来自自带 Inter，中文来自 `fetch_cjk` 运行时从 CDN 取的
+//!   那一份 Noto —— 8MB 不入库，见 `docs/text.md` 平台矩阵。左上角状态行的 `cjk …` 就是
+//!   它的到货结论。debug 构建下把窗口调小些即可）
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 #[cfg(target_arch = "wasm32")]
@@ -38,8 +41,6 @@ use sisf::asset::{VfsPath, VfsProvider, WebManifest};
 use sisf::event::EngineEvent;
 use sisf::render::{Atlas, AtlasPages, Bitmap, DrawStats, Renderer, Source, UploadRing};
 use sisf::text::{Align, FontBundle, TextEngine, TextStyle};
-#[cfg(target_arch = "wasm32")]
-use std::sync::Arc;
 
 /// 虚拟分辨率：RGSS classic 的 320×240，`Fill` 下与物理像素 1:1。
 const VIRTUAL: (u32, u32) = (320, 240);
@@ -68,14 +69,68 @@ const FONT: &str = "Inter-Regular.ttf";
 /// wasm 预取清单：一行一个路径，内容同 `web/assets/manifest.txt`。
 #[cfg(target_arch = "wasm32")]
 const MANIFEST: &str = "img_80x60.jpg\nimg_64x48.png\nimg_40x40.webp\nInter-Regular.ttf\n";
+/// 中文轮廓：与 `examples/dialog_demo.rs` 的 `CJK` 同一套策略 —— 同一个 CDN、同一个
+/// SHA、同样的"OTF 而不是 woff2"、同样**不入仓**（8MB）。为什么非要运行期取一次、
+/// 以及四种到货状态为什么少一种都不行，写在那边的 `Cjk` 上；这里只留最短的版本。
+#[cfg(target_arch = "wasm32")]
+const CJK: &str = "NotoSansSC-Regular.otf";
+#[cfg(target_arch = "wasm32")]
+const CJK_URL: &str = "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/SubsetOTF/SC/NotoSansSC-Regular.otf";
 
 /// 滚动正文：中英混排 + 硬换行 + 一条长拉丁句（靠 `wrap_width` 折行）。
 const LINES: &str = "勇者艾达与精灵们踏进了遗迹第三层。\nThe stone door reads: ENGINE 1234567890 \
 — keep walking, the map is drawn at 320x240.\n风从右边吹过来。";
 
+/// CDN 那份 CJK 的到货状态。为什么不是一个"读得到字节就算到"：`load_font` 等的是
+/// **这件事结束了** —— 一份永远不来的请求不能把本来能显示的拉丁一起拖死，所以"结束了
+/// 但没有"必须与"还在飞"分得开。四种结局都进状态行（方块不解释自己）。
+#[derive(Clone)]
+struct Cjk(Arc<AtomicU8>);
+
+const CJK_PENDING: u8 = 0;
+/// 桌面：这一趟 fetch 根本不存在，中文由系统字体兜（`docs/text.md` 平台矩阵）。
+const CJK_SYSTEM: u8 = 1;
+/// 字节已在清单里，等着注册。
+const CJK_ARRIVED: u8 = 2;
+/// 拿不到：请求挂了、响应是空的、或者那字节解不出 face。中文会是方块。
+const CJK_NONE: u8 = 3;
+
+impl Cjk {
+    fn new() -> Self {
+        #[cfg(target_arch = "wasm32")]
+        let start = CJK_PENDING;
+        #[cfg(not(target_arch = "wasm32"))]
+        let start = CJK_SYSTEM;
+        Self(Arc::new(AtomicU8::new(start)))
+    }
+
+    fn state(&self) -> u8 {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// 只有 wasm 会改写它（桌面的 `CJK_SYSTEM` 在 `new` 里一次定形）。
+    #[cfg(target_arch = "wasm32")]
+    fn set(&self, s: u8) {
+        self.0.store(s, Ordering::Relaxed);
+    }
+
+    /// 状态行里 `cjk …` 那一段。
+    fn label(&self) -> &'static str {
+        match self.state() {
+            CJK_PENDING => "pending",
+            CJK_SYSTEM => "system",
+            CJK_ARRIVED => "ok",
+            CJK_NONE => "MISSING",
+            _ => "?",
+        }
+    }
+}
+
 /// 图源装载状态：VFS 读取 + 图集装箱 + 上传队列。
 struct Assets {
     vfs: Vfs,
+    /// CDN 那份 CJK 到哪一步了（`load_font` 等的是"这件事结束了"，见 `dialog_demo`）。
+    cjk: Cjk,
     atlas: Atlas,
     pages: AtlasPages,
     uploads: UploadRing,
@@ -90,6 +145,7 @@ struct Assets {
 
 impl Assets {
     fn new() -> Self {
+        let cjk = Cjk::new();
         #[cfg(not(target_arch = "wasm32"))]
         let mut vfs = Vfs::new();
         #[cfg(not(target_arch = "wasm32"))]
@@ -106,12 +162,15 @@ impl Assets {
         let vfs = {
             let manifest = Arc::new(WebManifest::new(MANIFEST));
             prefetch(&manifest);
+            // 中文那份不排在清单里：清单只从本站 `assets/` 抓，而 8MB 的字体不入库。
+            fetch_cjk(&manifest, &cjk);
             let mut vfs = Vfs::new();
             vfs.register(Box::new(SharedManifest(manifest)));
             vfs
         };
         Self {
             vfs,
+            cjk,
             atlas: Atlas::with_limits(256, 6),
             pages: AtlasPages::new(),
             uploads: UploadRing::new(),
@@ -207,6 +266,53 @@ fn prefetch(manifest: &Arc<WebManifest>) {
     }
 }
 
+/// wasm：从 CDN 取 [`CJK`] 那份中文字体灌进清单（`insert` 收清单外的键）。两头都要说话：
+/// 到货说字节数，取不到说原因并写下 [`CJK_NONE`] —— 少了后者，`load_font` 会一直等一份
+/// 永远不来的字体，把本来能显示的拉丁一起拖死。
+#[cfg(target_arch = "wasm32")]
+fn fetch_cjk(manifest: &Arc<WebManifest>, cjk: &Cjk) {
+    use sisf::app::{js_sys, wasm_bindgen_futures, web_sys};
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let m = Arc::clone(manifest);
+    let c = cjk.clone();
+    wasm_bindgen_futures::spawn_local(async move {
+        let outcome: Result<Vec<u8>, String> = async {
+            let response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(CJK_URL))
+                .await
+                .map_err(|e| format!("{e:?}"))?;
+            let response = web_sys::Response::from(response);
+            // 404 页也会 resolve 出一个非空响应，而它解不出 face —— 那时候话说成"解析
+            // 不出任何 face"，排查的人会去查字体格式，而真正的错是 URL。
+            if !response.ok() {
+                return Err(format!("HTTP {}", response.status()));
+            }
+            let body = response.array_buffer().map_err(|e| format!("{e:?}"))?;
+            let buffer = wasm_bindgen_futures::JsFuture::from(body)
+                .await
+                .map_err(|e| format!("{e:?}"))?;
+            Ok(js_sys::Uint8Array::new(&buffer).to_vec())
+        }
+        .await;
+        match outcome {
+            Ok(bytes) if !bytes.is_empty() => {
+                platform::log_info(&format!("[windows] CJK 到货 {} 字节", bytes.len()));
+                m.insert(&vpath(CJK), bytes);
+                c.set(CJK_ARRIVED);
+            }
+            Ok(_) => {
+                web_sys::console::log_1(&format!("{CJK_URL} 响应是空的").into());
+                c.set(CJK_NONE);
+            }
+            Err(why) => {
+                web_sys::console::log_1(&format!("取 {CJK_URL} 失败: {why}").into());
+                c.set(CJK_NONE);
+            }
+        }
+    });
+}
+
 struct WindowDemo {
     assets: Assets,
     text: TextEngine,
@@ -249,20 +355,35 @@ impl WindowDemo {
     /// 自带字体到货则换上去（只换一次）。
     ///
     /// 换之前一个字都没画过（见 `draw` 的门控），所以覆盖率图集里不会有旧 face 的
-    /// 缓存项 —— 字体族中途换脸是会串字的。
+    /// 缓存项 —— 字体族中途换脸是会串字的。也正因如此，等的不是"Inter 到了"而是
+    /// "**CJK 这件事结束了**"：先装 Inter 再补 CJK 就是中途换脸。
     fn load_font(&mut self) {
-        if self.bundled {
+        if self.bundled || self.assets.cjk.state() == CJK_PENDING {
             return;
         }
-        let Some(bytes) = self.assets.vfs.read(&vpath(FONT)) else {
+        let Some(inter) = self.assets.vfs.read(&vpath(FONT)) else {
             return;
         };
-        let bundle = FontBundle::from_bytes(&bytes);
+        // 注册顺序 = 桌面的顺序：**CJK 先、Inter 最后**，于是拉丁出自 Inter（与桌面
+        // 同源），中文靠 per-glyph 回退落到那份 Noto 上（`docs/text.md` 平台矩阵）。
+        let mut bundle = FontBundle::system();
+        // 只读一次：这份字节有 8MB，而 `Vfs::read` 是拷贝出来的。
+        #[cfg(target_arch = "wasm32")]
+        if self.assets.cjk.state() == CJK_ARRIVED
+            && let Some(bytes) = self.assets.vfs.read(&vpath(CJK))
+            && let Err(why) = bundle.register_bytes(&bytes)
+        {
+            self.assets.cjk.set(CJK_NONE);
+            platform::log_info(&format!("[windows] CJK 用不了: {why}"));
+        }
+        if let Err(why) = bundle.register_bytes(&inter) {
+            platform::log_info(&format!("[windows] 自带字体用不了: {why}"));
+        }
         platform::log_info(&format!(
-            "[windows] 自带字体: {:?}（face {}，回退 {:?}）",
+            "[windows] 自带字体: {:?}（{}，face {}）",
             bundle.family(),
-            bundle.face_count(),
-            bundle.fallback(),
+            self.assets.cjk.label(),
+            bundle.face_count()
         ));
         *self.text.bundle_mut() = bundle;
         self.bundled = true;
@@ -352,10 +473,11 @@ impl WindowDemo {
     fn draw_status(&mut self, renderer: &mut Renderer) {
         let bundle = self.text.bundle();
         let line = format!(
-            "f{} · font {:?}({}) · win {} + main {} batches · {} pages",
+            "f{} · font {:?}({}) cjk {} · win {} + main {} batches · {} pages",
             self.frames,
             bundle.family().unwrap_or("system"),
             bundle.face_count(),
+            self.assets.cjk.label(),
             self.paint.map_or(0, |s| s.batches),
             self.stats.map_or(0, |s| s.batches),
             self.assets.atlas.live_pages(),
