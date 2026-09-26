@@ -412,7 +412,10 @@ impl InputState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // T12：`cargo xtask wasm-test` 在 wasm 上跑这一组（见 docs/platforms.md）。
     use sisf_sprite::Vec2;
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
 
     fn press(code: &str) -> EngineEvent {
         EngineEvent::key(code, KeyKind::Press, None)

@@ -2,5 +2,9 @@
 xtask = "run --package xtask --"
 
 [target.wasm32-unknown-unknown]
-# 占位 runner：wasm 产物通过 `cargo xtask web` 起本地服务后在浏览器验证（T12 换成自动开浏览器）
-runner = "echo 'run via `cargo xtask web` instead'"
+# T12：`cargo xtask wasm-test` 的外壳。原先这里是 `echo 'run via cargo xtask web instead'`
+# —— 那等于任何 wasm 测试命令都以"0 个用例 + 退出码 0"通过，是最坏的一种绿。
+# 驱动是 node（清单字面写的 `wasm-pack test --chrome` 已在 todo.md 记为偏离：本机没有
+# wasm-pack/Chrome，而"跑在浏览器里"是 wasm-bindgen 的**编译期**配置、不是命令行开关）。
+# 透传给 harness 的参数只有 filter/`--skip`/`--list`/`--format` 那几个，没有 `--chrome`。
+runner = "wasm-bindgen-test-runner"

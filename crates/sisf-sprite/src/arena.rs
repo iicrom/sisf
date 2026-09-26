@@ -166,7 +166,10 @@ impl SpriteArena {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // T12：`cargo xtask wasm-test` 在 wasm 上跑这一组（见 docs/platforms.md）。
     use crate::sprite::{Layer, Vec2};
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
 
     fn at(x: f32) -> Sprite {
         Sprite {

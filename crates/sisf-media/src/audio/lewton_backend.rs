@@ -79,7 +79,7 @@ impl LewtonDecoder {
 
     /// 从 lewton 自己解析的 Vorbis comments 里取循环点（不引 lofty）。
     ///
-    /// 键名与容错解析和 symphonia 链共用同一份词表（见 [`LOOP_START_KEYS`]），否则
+    /// 键名与容错解析和 symphonia 链共用同一份词表（见 `LOOP_START_KEYS`，它是本模块私有常量），否则
     /// "换个解码器循环点就没了"这种差异没人会去查。
     pub fn loop_tags(&self) -> Option<(u32, u32)> {
         let comments = &self.reader.comment_hdr.comment_list;

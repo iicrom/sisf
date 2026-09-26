@@ -37,8 +37,7 @@ wav = ["dep:sisf-media", "sisf-media/wav", "sisf-audio/wav"]
 midi = ["dep:sisf-media", "sisf-media/midi", "sisf-audio/midi"]
 # 启用：sisf-media/video → native ffmpeg-next / web video 胶水（T11 桩）
 video = ["dep:sisf-media", "sisf-media/video"]
-# 启用：sisf-app/inspector → egui 调试面板（T12）
-inspector = ["sisf-app/inspector"]
+# 没有 `inspector`：T12 定案不引 egui 调试面板（`sisf-app` 那边同步删掉了空 feature）。
 # 启用：sisf-rpgmk 兼容层（T11）
 rpgmk = ["dep:sisf-rpgmk"]
 # 启用：sisf-media/simd-jpeg → turbojpeg（native only，T4）

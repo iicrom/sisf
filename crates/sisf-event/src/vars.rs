@@ -264,7 +264,10 @@ fn modulo(a: i64, b: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // T12：`cargo xtask wasm-test` 在 wasm 上跑这一组（见 docs/platforms.md）。
     use crate::command::{CmpOp, Cond, Expr, SetOp, Slot};
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
 
     fn e(i: i64) -> Box<Expr> {
         Box::new(Expr::Lit(i))

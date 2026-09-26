@@ -474,9 +474,12 @@ impl SpriteArena {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // T12：`cargo xtask wasm-test` 在 wasm 上跑这一组（见 docs/platforms.md）。
     use crate::draw::ViewportRef;
     use crate::sprite::Vec2;
     use sisf_render::{Atlas, BatchList};
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
 
     /// 每帧 120ms（时间驱动用例里才是"节奏"，方向图样用例只看它不被读）。
     const MS: u32 = 120;

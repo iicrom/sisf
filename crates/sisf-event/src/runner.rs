@@ -18,7 +18,7 @@
 //!
 //! ## 谁驱动调度器：事件机
 //!
-//! [`TaskScheduler`](sisf_sprite::task::TaskScheduler) 也在 `EventCtx` 里，但游戏侧
+//! [`TaskScheduler`](sisf_sprite::task) 也在 `EventCtx` 里，但游戏侧
 //! **不该**自己 `tasks.tick`：一拍推进一次的职责归 [`EventRunner::tick`]。两处都推 = 路线
 //! 跑得比逻辑快两倍，而且这种错没有任何报错信息。游戏侧只负责每拍开头
 //! [`SpriteArena::begin_tick`](sisf_sprite::SpriteArena::begin_tick)（`prev_pos` 不变量，
@@ -27,7 +27,7 @@
 //! ## 挂起与预算
 //!
 //! 需要外部条件的指令（文字、按键、等待、移动、淡入淡出）把 `pc` **留在下一条**，然后
-//! 把"在等什么"记进 [`Hold`]：这样解挂之后不会重跑那条指令（重跑一个 `ShowText` 等于把
+//! 把"在等什么"记进 `Hold`（私有枚举）：这样解挂之后不会重跑那条指令（重跑一个 `ShowText` 等于把
 //! 玩家刚按下的确认吃掉）。[`RunnerStatus::OverBudget`] 只在指令边界出现，所以一个没有
 //! `Wait` 的 `Loop` 最多吃掉 `budget` 条指令，下一拍从同一个 `pc` 接着跑 —— 死循环写错了
 //! 也只是"这一拍慢了"，不会把窗口冻住。
@@ -56,7 +56,7 @@ use crate::command::{
 use crate::script::{ScriptBackend, Submission};
 use crate::vars::VarStore;
 
-/// 决定/取消/上下移动的默认动作名（与 [`ActionMap::rpg_maker`] 同一套）。
+/// 决定/取消/上下移动的默认动作名（与 [`crate::input::ActionMap::rpg_maker`] 同一套）。
 ///
 /// 写死在这里是有意的：动作名可以换，但"选项靠上下 + 决定"这件事必须有个缺省，否则每个
 /// 事件表都要重复声明一遍键位。
@@ -321,7 +321,7 @@ pub struct EventCtx<'a> {
 }
 
 impl EventCtx<'_> {
-    /// 取空总线（事件机是唯一消费者）。取走的东西要么用掉、要么由 [`Batch::flush`] 放回。
+    /// 取空总线（事件机是唯一消费者）。取走的东西要么用掉、要么由 `Batch::flush`（私有）放回。
     pub fn take_events(&mut self) -> Vec<EngineEvent> {
         self.bus.drain()
     }
@@ -362,7 +362,7 @@ pub enum RunnerStatus {
     /// 指令栈空且没有挂起 ⇒ 世界归玩家。
     Idle { executed: u32 },
     /// 挂在外部条件上。`reason` 是 ASCII 令牌（`text`/`key`/`wait`/`task`/`fade`，见
-    /// [`EventRunner::hold_variant`]），游戏侧可以直接比较它；"玩家为什么动不了"当场就能答。
+    /// `EventRunner::hold_variant`（私有）），游戏侧可以直接比较它；"玩家为什么动不了"当场就能答。
     Suspended { executed: u32, reason: &'static str },
     /// 预算用完，停在指令边界 ⇒ 下一拍从同一个 `pc` 继续。
     OverBudget { executed: u32 },
@@ -1156,9 +1156,12 @@ fn spawn_anim(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // T12：`cargo xtask wasm-test` 在 wasm 上跑这一组（见 docs/platforms.md）。
     use crate::bus::{EngineEvent, Lifecycle};
     use crate::command::{CmpOp, Cond, EventDef, Expr, Param, RouteStep, SetOp};
     use sisf_sprite::{Sprite, SpriteArena, Vec2};
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
 
     /// 录下所有音频请求的端口（顺便当"没有解码 feature 的构建"的替身：`fail_with` 一设，
     /// 每条起播都失败，正好验告警通路）。

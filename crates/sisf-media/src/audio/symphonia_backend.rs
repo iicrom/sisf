@@ -230,7 +230,7 @@ impl Decoder for SymphoniaDecoder {
     }
 
     /// 定位到绝对帧号：容器只能跳到**包边界**（`SeekMode::Accurate` 保证落在目标之前），
-    /// 剩下的帧由 [`Self::pull`] 解码后丢弃。
+    /// 剩下的帧由 `Self::pull`（私有）解码后丢弃。
     fn seek_sample(&mut self, frame: u64) -> Result<(), AudioError> {
         let ts = self.ts_of(frame);
         self.format

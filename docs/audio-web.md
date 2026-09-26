@@ -24,7 +24,8 @@ autoplay 解锁、页面隐藏省电、统计）都在 JS 里 —— 因为 `sis
 
 **为什么 worklet 不能同步 pull（清单字面形状）**：从音频线程回调主线程 WASM 需要
 SharedArrayBuffer + Atomics，而那要求页面开 COOP/COEP 跨源隔离与 `+atomics` 编译目标 ——
-本仓库的 wasm 构建两样都没开（`xtask web` 是 plain `wasm-pack --target web`）。于是 worklet
+本仓库的 wasm 构建两样都没开（`xtask web` = `cargo build --release --target wasm32-unknown-unknown`
++ `wasm-bindgen --target web`，既没开 `+atomics`，服务也不发 COOP/COEP 头）。于是 worklet
 通路退化成"需求上报 + 主线程按需求渲染"。这是与清单的第三处字面差异，代码与本文档都记着。
 
 `web/audio_worklet.js` 这个文件名因此落地成**内联 Blob**：`audio_pump.js` 里的 `WORKLET_SRC`
@@ -163,7 +164,12 @@ state=running kind=worklet worklet=yes baseLatency=0.0100s outputLatency=0.0400s
 > 反例也验过：把修账前的胶水放到同一个位置跑，第一行就
 > `FAIL fps=60: 报的深度与真实排队量最大差 238507.5 帧 > 一个 quant`。
 > 消息投递比浏览器更急（这里是同步的），所以它绿不等于浏览器绿 —— 最终判据仍是控制台那行，
-> 但这个把"明显的账错"挡在了人手复验之前。永久的家应该是 `xtask wasm-test`（todo.md 后续项）。
+> 但这个把"明显的账错"挡在了人手复验之前。
+>
+> T12 补一句免得被误当成 `cargo xtask wasm-test` 的一部分：**这个 mjs 不在那一腿里**。
+> `wasm-test` 跑的是 Rust 侧的纯逻辑用例（把 `#[test]` 别成 `#[wasm_bindgen_test]`，
+> 见 `docs/platforms.md` 的 wasm-test 一节），而这条测的是 `audio_pump.js` 这份 JS 胶水自己 ——
+> 它在 wasm 里没有对应的 Rust 断言面。所以它的家仍然是上面这条 `node` 命令（CI 里同一条）。
 >
 > 另一条防线：`node --check crates/sisf-audio/src/audio_pump.js`（`WORKLET_SRC` 是模板字符串，
 > 注释里写反引号会当场截断它，而 cargo 一侧毫无感觉 —— 修账时真踩过两次）。
@@ -215,7 +221,9 @@ node crates/sisf-audio/tests/pump_bookkeeping.mjs --transit 3
 
 默认模式下两条恒等式都成立（`queued` 与真实排队量最大差 ≤1.5f、`buffered - 真实 == inflight`），
 证明**记账是对的**；一旦给投递加延迟，缺口就复现 —— transit=1 时 60fps 仍稳但
-`FAIL fps=50: 预热后 underrun 又涨了 12800 帧，低水位 0f`，transit=3 时连 60fps 都撑不住。
+`FAIL fps=50: 预热后 underrun 又涨了 12800 帧，低水位 0f`，transit=3 时连 60fps 都撑不住
+（2026-09-26 本机复跑：默认那条退出码 0、五条 fps 全 ok；`--transit 3` 退出码 1，读数与上面对话框
+里的字面量一致。**所以只有第一条是 CI 闸门**，后两条的 FAIL 就是它要复现的东西，见 `.github/workflows/ci.yml`）。
 浏览器实际在途 ≈3 个 quant，而 `TARGET_FRAMES = 1024` 相对一个 tick 的消耗只留了 ¼ 的余量
 （60fps 下 ≈200f < 384f），所以只有长帧会把它击穿。
 

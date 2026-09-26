@@ -12,3 +12,8 @@ serde.workspace = true
 serde_json.workspace = true
 ron.workspace = true
 thiserror.workspace = true
+
+# T12：`cargo xtask wasm-test` 跑本 crate 的纯逻辑测试（bus/command/input/runner/script/vars）。
+# 只在 wasm32 target 的 dev-dependencies 里 —— 运行时依赖面与另两端完全无关。
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test.workspace = true

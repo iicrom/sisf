@@ -3,7 +3,7 @@
 //! 存在的理由不是"现在有人要发消息"，而是**给那条消息留一个已经定型的口子**：T10 的事件
 //! 解释器有 `Command::Custom`，QuickJS 与 RPG Maker 移植层都要往引擎里塞结构化消息，而它
 //! 们的调用点都不在 `Runner` 手里（JS 那边连 Rust 对象都拿不到）。所以这里用一条全局队列，
-//! `Runner` 每次派发前取空、按到达顺序追加到总线尾部（见 [`EngineBus`](sisf_event::EngineBus)）。
+//! `Runner` 每次派发前取空、按到达顺序追加到总线尾部（见 [`EngineBus`]）。
 //!
 //! 载荷是 `serde_json::Value` 而不是 `Vec<u8>`：跨 wasm 边界时它对应的就是 JS 侧那个对象，
 //! 不必在两边各抄一套编解码。
@@ -18,7 +18,7 @@ use sisf_event::{EngineBus, EngineEvent};
 /// 一条消息：主题号 + 任意 JSON 载荷。
 type Message = (u32, serde_json::Value);
 
-/// 可单测的队列本体（全局那份见 [`GLOBAL`]，包一层是为了能在测试里造互不干扰的实例）。
+/// 可单测的队列本体（全局那份见 `GLOBAL`（私有），包一层是为了能在测试里造互不干扰的实例）。
 #[derive(Default)]
 pub struct CustomInbox {
     queue: VecDeque<Message>,
@@ -65,7 +65,10 @@ pub(crate) fn drain_global_into(bus: &mut EngineBus) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // T12：`cargo xtask wasm-test` 在 wasm 上跑这一组（见 docs/platforms.md）。
     use serde_json::json;
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
 
     /// 验收点名的顺序：先进先出，且真的落到总线里。
     #[test]

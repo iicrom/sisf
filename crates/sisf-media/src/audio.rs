@@ -316,7 +316,7 @@ fn decode_ogg(bytes: &[u8]) -> Result<AudioData, AudioError> {
 
 /// 显式走 lewton 回退链解 OGG。
 ///
-/// 两条 feature 同时开时 [`decode_ogg`] 仍然首选 symphonia —— 这个入口是用来**对拍**和
+/// 两条 feature 同时开时 `decode_ogg`（私有）仍然首选 symphonia —— 这个入口是用来**对拍**和
 /// 急救的（"symphonia 解不出声、lewton 能" 这种问题时，不必重编一个只开回退的构建）。
 #[cfg(feature = "ogg-lewton")]
 pub fn decode_ogg_lewton(bytes: &[u8]) -> Result<AudioData, AudioError> {

@@ -2,7 +2,9 @@
 //!
 //! 纯逻辑，不碰 wgpu，三端（含 wasm）都能跑单测。
 
-/// 混合模式对应的管线。`Multiply/Screen` 在 T12 决策（见 todo.md），此处不占位。
+/// 混合模式对应的管线。**一个变体 = 一条管线**，所以枚举里没有映射不到的成员：
+/// `Multiply/Screen` 在 T12 定案为不移植（RGSS 侧的语义损失与替代写法见 `docs/sprite.md`），
+/// 要支持就连着 pipeline 与批键一起加，不放占位变体。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Blend {
     /// alpha-over（预乘 src）。
@@ -205,6 +207,9 @@ fn batch_of(key: BatchKey, start: u32, len: u32, capacity: u32) -> Batch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // T12：`cargo xtask wasm-test` 在 wasm 上跑这一组（见 docs/platforms.md）。
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
 
     fn key(layer: u8, epoch: u64, blend: Blend, z: i32) -> BatchKey {
         BatchKey {

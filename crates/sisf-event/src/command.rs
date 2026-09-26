@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 /// 变量槽：三态存储（[`VarStore`](crate::vars::VarStore)）的地址。
 ///
 /// `Switch` 是布尔开关、`Int` 是参与算术的整数、`Var` 是命名文本槽（数字以文本存，
-/// 求值时能解析就解析、不能解析算 0，见 [`crate::vars::Expr`]）。
+/// 求值时能解析就解析、不能解析算 0，见 [`Expr`]）。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Slot {
     Switch(u32),
@@ -610,7 +610,10 @@ impl EventDef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // T12：`cargo xtask wasm-test` 在 wasm 上跑这一组（见 docs/platforms.md）。
     use Command::*;
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
 
     /// 一份把**每个变体**都过一遍的事件表（往返测试的覆盖面就靠它撑）。
     fn kitchen_sink() -> EventDef {

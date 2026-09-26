@@ -1,0 +1,147 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------- 静态闸门
+  lint:
+    name: fmt + clippy + check-all
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 系统依赖（cpal 要 ALSA、gilrs 要 udev 的 dev 头）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev pkg-config
+
+      # 本地判定标准出自 1.95.0-nightly —— "什么算已格式化/什么算 lint 干净"是它的
+      # rustfmt/clippy 版本定的，所以 CI 也钉 nightly：换 stable 时红的可能只是工具版本。
+      - name: 工具链与目标
+        run: |
+          rustup default nightly
+          rustup target add wasm32-unknown-unknown aarch64-linux-android
+          rustup target list --installed
+          cargo --version
+
+      - name: cargo xtask fmt --check
+        run: cargo xtask fmt --check
+
+      - name: cargo xtask clippy
+        run: cargo xtask clippy
+
+      # 四组 feature 组合（宿主 --all-features / wasm web / android native / wasm 音频全开）。
+      # 少装一个 target 会以"can't find executable for target"失败，不会静默跳过那一组。
+      - name: cargo xtask check-all
+        run: cargo xtask check-all
+
+  # ---------------------------------------------------------------- 单元测试
+  test:
+    name: test (${{ matrix.os }}，GPU ${{ matrix.gpu_tests }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # GPU 相关套件按平台分叉：`gpu_tests`（atlas/bitmap/renderer 的读回）与
+          # `readback_clear` 在没有 adapter 的环境里是 `.expect(...)` 硬失败，不是跳过。
+          # ubuntu-latest 没有可用 GPU ⇒ 那一腿跳过这两组，由 windows 腿与 golden job 覆盖；
+          # 反过来 windows 全跑。
+          - os: windows-latest
+            gpu_tests: 全跑
+            test_args: ""
+          - os: ubuntu-latest
+            gpu_tests: 跳过，无 adapter
+            test_args: "-- --skip gpu_tests --skip readback_clear"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # 同 lint：ubuntu 上编译 `--all-features` 就要过 cpal/gilrs 的 build script。
+      - name: 系统依赖（ALSA / udev）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev pkg-config
+
+      - run: rustup default nightly
+
+      - name: cargo test --workspace --all-features ${{ matrix.test_args }}
+        run: cargo test --workspace --all-features ${{ matrix.test_args }}
+
+      # 门面 crate 的顶层 doc 示例（开窗 + 一个 sprite + BGM + 一个 RON 事件）就是 T12 的
+      # 验收物之一，`--doc` 单独一步：它挂了要一眼看出来，不是混在工作区几百个用例里。
+      - name: cargo test --doc -p sisf --all-features
+        run: cargo test --doc -p sisf --all-features
+
+  # ---------------------------------------------------------------- wasm 一侧
+  wasm:
+    name: wasm-test + 产物
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 工具链
+        run: |
+          rustup default nightly
+          rustup target add wasm32-unknown-unknown
+          node --version
+
+      # CLI 版本必须与锁文件里的 wasm-bindgen 完全一致（否则 runner 与生成的胶水对不上，
+      # 报的是"unsupported version"这类和代码无关的错）。两个 bin（wasm-bindgen、
+      # wasm-bindgen-test-runner）来自同一个包，装一次。
+      - name: 安装 wasm-bindgen CLI（版本取自 Cargo.lock）
+        run: |
+          v=$(awk '/^name = "wasm-bindgen"$/{getline; gsub(/"/, ""); print $3}' Cargo.lock)
+          echo "wasm-bindgen = $v"
+          cargo install --locked wasm-bindgen-cli --version "$v"
+          wasm-bindgen --version
+          wasm-bindgen-test-runner --version
+
+      - name: cargo xtask wasm-test
+        run: cargo xtask wasm-test
+
+      # JS 侧的混音账（worklet 胶水的确定性）—— 它不是 Rust 用例，wasm-test 那一腿覆盖不到，
+      # 判据与为什么不搬进 wasm-test 见 docs/audio-web.md。
+      # ⚠️ 只把**默认那条**当闸门：`--transit 1/3` 是"给投递加延迟就复现在途缺口"的手动复现，
+      # 按设计就会 FAIL（退出码 1，`docs/audio-web.md` 里那段"定价"记的就是它没修的残余缺口）。
+      # 把它写成 CI 步骤只会让 job 常红，那不等于回归。
+      - name: node 侧泵账契约测试
+        run: |
+          node --check crates/sisf-audio/src/audio_pump.js
+          node crates/sisf-audio/tests/pump_bookkeeping.mjs
+
+      # `--no-serve`：`xtask web` 末尾是个 `incoming()` 死循环，CI 里会永远挂着。
+      - name: cargo xtask web hello_window --no-serve
+        run: cargo xtask web hello_window --no-serve
+
+      - name: 上传 wasm 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-hello_window
+          path: |
+            web/pkg/
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------- golden
+  golden:
+    name: golden (windows)
+    # golden 只在 Windows 跑：测试文件整个 `#![cfg(windows)]`（wgpu 没有软件光栅后端，
+    # 离屏同样要真 adapter）。在别的 OS 上它会编译成 0 个用例并"通过"，那种绿没有意义。
+    # ⚠️ runner 上的 adapter 通常是 D3D12 WARP；若某天 `request_adapter` 取不到，
+    # 这条 job 会红在 `.expect("离屏渲染器需要可用 adapter（DX12/Vulkan）")`，
+    # 那不是回归，是环境 —— 判据看那行 expect，别去改阈值。
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup default nightly
+      - name: cargo xtask golden
+        run: cargo xtask golden

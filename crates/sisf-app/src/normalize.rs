@@ -215,9 +215,12 @@ pub(crate) mod pad {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // T12：`cargo xtask wasm-test` 在 wasm 上跑这一组（见 docs/platforms.md）。
     use crate::config::AppConfig;
     use sisf_event::ActionEdge;
     use sisf_event::InputState;
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
     use winit::keyboard::KeyCode;
 
     fn frame() -> FrameCtx {

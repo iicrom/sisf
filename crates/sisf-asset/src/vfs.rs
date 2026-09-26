@@ -7,8 +7,8 @@
 //! - [`DirProvider`]（native）：挂一个目录，`std::fs` 读取；先按规范化小写键找，
 //!   找不到再按原始拼写找（区分大小写的文件系统上两种上架方式都能命中）。
 //! - [`MemoryProvider`]：内存表，单测与内嵌资源用。
-//! - [`WebManifest`]（`web` + wasm32）：预置清单；宿主 JS 把文件 fetch 成字节后
-//!   经 [`WebManifest::insert`] 灌进内部 [`MemoryProvider`]，`VfsProvider::read`
+//! - `WebManifest`（`web` + wasm32，所以宿主 doc 里链不到）：预置清单；宿主 JS 把文件 fetch 成字节后
+//!   经 `WebManifest::insert` 灌进内部 [`MemoryProvider`]，`VfsProvider::read`
 //!   因此永远是同步的。清单未就绪的路径表现为"不存在"，应用侧下一帧重试。
 //!
 //! 规划中的 provider（本阶段只登记接口，不实装）：

@@ -16,10 +16,10 @@
 //! cpal 不提供"默认设备变了"的通知，错误回调也**不保证**会来（拔掉蓝牙耳机后 WASAPI 常常
 //! 只是静默地把流停在原地）。于是两路兜底：
 //! 1. `StreamError` → 置 `rebuild`，主线程下一次 `pump()` 重建流；
-//! 2. 每 [`DEVICE_POLL`] 主动查一次默认输出设备的 `DeviceId`，变了就重建（重建后环清空，
+//! 2. 每 `DEVICE_POLL`（模块私有常量）主动查一次默认输出设备的 `DeviceId`，变了就重建（重建后环清空，
 //!    不播陈旧缓冲）。
 //!
-//! 两条都受 [`OPEN_RETRY`] 节流，避免设备真的没了时每次都开一遍流。
+//! 两条都受 `OPEN_RETRY` 节流，避免设备真的没了时每次都开一遍流。
 
 use std::sync::Arc;
 use std::sync::atomic::{
@@ -690,6 +690,11 @@ mod tests {
     fn ring_moves_data_between_threads() {
         const N: usize = 200_000;
         let r = Arc::new(Ring::with_frames(256));
+        // 上台前先读一次空环：最后那句 `underrun > 0` 从此是**构造出来的**，而不是
+        // "消费线程自由自旋，调度理应有取空的时候"。后者在全量并行下红过一次
+        // （`cargo test --workspace --all-features`，同一腿单跑与 60 次满载复跑都绿），
+        // 而"应该有"的判据本身就是那种偶尔炸的绿。
+        assert_eq!(r.pop(&mut [0.0f32; 37]), 0, "生产者还没上台，环该是空的");
         let (prod, cons) = (Arc::clone(&r), Arc::clone(&r));
         let producer = std::thread::spawn(move || {
             let mut i = 0usize;
@@ -732,7 +737,7 @@ mod tests {
         assert_eq!(r.filled(), 0, "全部样本都被消费掉了");
         assert!(
             r.underrun_samples() > 0,
-            "消费线程是自由自旋的，理应有取空的时候（否则这测试没压到空环路径）"
+            "空环路径有账（开头那次预读已经把它钉成构造事实）"
         );
     }
 

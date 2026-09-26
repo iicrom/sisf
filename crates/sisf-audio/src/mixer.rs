@@ -770,8 +770,11 @@ impl Mixer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // T12：`cargo xtask wasm-test` 在 wasm 上跑这一组（见 docs/platforms.md）。
     use std::cell::RefCell;
     use std::rc::Rc;
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
 
     /// 确定性样本：**每个样本都编码自己所在的帧号**（左右同值，`f as f32 / 1000`，
     /// 每 500 帧回绕一次以免顶到满幅）。于是"输出里读到哪个值"直接反推"读到了第几帧"，

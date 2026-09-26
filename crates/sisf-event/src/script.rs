@@ -74,6 +74,9 @@ impl ScriptBackend for NullScriptBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // T12：`cargo xtask wasm-test` 在 wasm 上跑这一组（见 docs/platforms.md）。
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
 
     /// 接口得是对象安全的（`Box<dyn ScriptBackend>` 才装得进虚拟机）。完整的
     /// "装上去、三个钩子都 fire" 在 `runner::tests::backend_hooks_fire` —— 那边才有测试世界。

@@ -15,7 +15,9 @@
 ```sh
 cargo xtask check-all     # 宿主 --all-features + wasm32 web + aarch64-linux-android native
 cargo xtask clippy        # -D warnings
-cargo test                # 纯逻辑 + GPU 读回（见下）
+cargo test --workspace --all-features   # 纯逻辑 + GPU 读回（见下）
+cargo xtask wasm-test     # 同一批纯逻辑测试跑在 wasm32 上（见"wasm 上的纯逻辑测试"）
+cargo xtask golden        # 离屏 golden 比对（仅 Windows，见 docs/bench.md）
 ```
 
 ## 桌面
@@ -156,6 +158,48 @@ cargo xtask web tiled_map # 换示例：不带示例名时缺省只构建 hello_
   Rust panic 到 JS 只剩一个 `RuntimeError: unreachable`，原文与位置全丢，而 rAF 链一断页面就
   定格成黑屏 —— 没有任何可诊断输出。T8e 的"打不开、也没日志"就是靠这条钩子才认出真因是
   cosmic-text 的 `expect("no default font found")`（见 `docs/text.md` wasm 约束第 3 条）。
+
+## wasm 上的纯逻辑测试（T12）
+
+```sh
+cargo xtask wasm-test              # 七条腿（sisf-app 占两条），合计 195 个用例（清单在 xtask 的 WASM_TESTS）
+cargo xtask wasm-test atlas        # 后面的参数原样透传给 harness（这里只跑名字含 atlas 的）
+```
+
+`wasm32-unknown-unknown` 不是"另一个 CPU"，是**另一个运行环境**：没有文件系统、没有线程，
+`std::time::Instant::now()` 直接 panic。所以这一腿只跑**纯逻辑**套件，覆盖
+VFS 路径规范化、atlas 装箱、batch 排序、事件 VM、mixer 确定性 —— 也就是那些
+"在桌面上过了、浏览器里未必"的部分。跑不了的一律**写明原因**，而不是静默缺席：
+
+| 套件 | 为什么不在这一腿 |
+|---|---|
+| `asset::vfs`、`media` | 要临时目录 / 读 fixture，wasm 上没有 `std::fs` |
+| `asset::store`、`asset::tasks` | `Harness::wait` 靠 `thread::sleep` 泵任务，wasm 没有线程也没有时钟 |
+| `text` | 启动要扫系统字体目录 |
+| `render::gpu_tests`、`atlas_gpu`、`bitmap`、两个 golden | 要真 adapter；wasm 上由浏览器手测覆盖 |
+
+透传给 harness 的参数只有 libtest 那几个（filter、`--skip`、`--list`、`--exact`、`--nocapture`、
+`--format`）。`--quiet` 与 `--test-threads=1` 会被 `wasm-bindgen-test-runner` 直接判退出码 1（本机各验过一次），
+所以"少打点输出"这种诉求在这里没有出口 —— 想降噪就加 filter。
+
+三个容易骗过人的点，都是这轮实装时钉的：
+
+1. **`#[test]` 在 wasm 上默认不跑**。libtest 的 harness 会编译进去，但 runner 只执行
+   `#[wasm_bindgen_test]` ⇒ 用例数 0、退出码 0。所以每个进清单的 `mod tests` 里都有
+   `#[cfg(target_arch = "wasm32")] use wasm_bindgen_test::wasm_bindgen_test as test;`，
+   而 `xtask wasm-test` 发现某腿通过数为 0 就判失败（带过滤参数时不判 —— 0 命中是过滤，不是漏别名）。
+2. **`.cargo/config.toml` 里那个 `runner` 曾经是 `echo`**。它让任何 wasm 测试命令都以
+   "0 个用例 + 退出码 0" 通过，现在指向 `wasm-bindgen-test-runner`。
+3. **driver 是 node，不是 `wasm-pack test --chrome`**（todo.md 清单的字面写法）。本机没有
+   `wasm-pack`，也没有 Chrome/chromedriver；更要紧的是 wasm-bindgen 的"跑在浏览器里"是
+   **编译期**由 `wasm_bindgen_test_configure!(run_in_browser)` 决定的，不是命令行开关 ——
+   为一条测试腿把整个测试 profile 钉进浏览器，换来的只是同一批纯逻辑用例换个宿主。
+   这条偏离记在 `todo.md` 的 T12 记账里。
+
+`sisf-app` 占两条腿：全量 25 个用例在这台机器上会在 **node 退出时**撞 libuv 断言
+（`!(handle->flags & UV_HANDLE_CLOSING), src\win\async.c:76`，退出码 `0xC0000409`），
+而所有用例都已 `test result: ok`。复现边界、排除掉的假解释（输出量：`--format terse` 照样崩）
+与为什么不吞这个退出码，都写在 `xtask/src/main.rs` 的 `APP_LEG_SPLIT`。
 
 ## Android
 

@@ -21,7 +21,7 @@ pub trait App {
     /// 投影烘焙之前的几何对齐：`alpha` 与本帧 [`App::draw`](Self::draw) 拿到的是同一个系数。
     ///
     /// 为什么要单独一相：viewport 栈是在 `tick` 之后、`draw` 之前烘进 `FrameU` 的（帧顺序见
-    /// [`crate::runner`]），所以在 `draw` 里 `push_viewport` 只对**下一帧**生效。跟着 sprite
+    /// `crate::runner`（私有模块）），所以在 `draw` 里 `push_viewport` 只对**下一帧**生效。跟着 sprite
     /// 插值位置走的相机因此只能在这里推：放 `tick` 末会差 `(1 - alpha) × 每拍位移` 像素 ——
     /// 相机钉在拍尾、角色画在拍中的插值点上，角色相对地图每拍被拽回去一次，看着就是抖动；
     /// 放 `draw` 则永远慢一帧。纯屏幕固定的 HUD/后处理不需要这一相。

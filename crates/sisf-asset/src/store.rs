@@ -385,6 +385,9 @@ enum Start<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 这一组**不在** `cargo xtask wasm-test` 里：`Harness::wait` 靠 `thread::sleep` 泵
+    // `WasmTasks`，而 wasm32-unknown-unknown 既没有线程也没有时钟（`docs/platforms.md`）。
+
     #[cfg(not(target_arch = "wasm32"))]
     use crate::tasks::NativeTasks;
     #[cfg(target_arch = "wasm32")]

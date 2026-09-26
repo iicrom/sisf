@@ -5,7 +5,7 @@
 //! 通用通路会把映射不到的键丢掉（`ItemKey` 是宏生成的封闭枚举，没有 unknown 变体），
 //! `LOOPSTART` 恰好就是映射不到的那种。
 //!
-//! - OGG：Vorbis comments，任意键名都在 → [`VorbisComments::get`]。
+//! - OGG：Vorbis comments，任意键名都在 → lofty 的 `VorbisComments::get`。
 //! - MP3：ID3v2 的 TXXX（用户文本帧），ffmpeg 写 `-metadata LOOPSTART=…` 就落在这里。
 //! - WAV：lofty 只认 `fmt /fact/data/LIST`，**没有** `smpl`/`cue` 通路 → 恒 `None`，
 //!   于是 WAV 整段循环（见 `docs/audio.md`）。要 `smpl` 得自己走 chunk 遍历。

@@ -51,11 +51,11 @@ impl ViewportRef {
     }
 }
 
-/// 采集失败。当前只有一条：本阶段无通路的 tone。
+/// 采集失败。当前只有一条：无着色器通路的 tone。
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum CollectError {
-    /// [`crate::sprite::Tone::Matrix`] 没有着色器通路（T12 决策前既不实现，也不静默当无效果）。
-    #[error("Tone::Matrix 本阶段无着色器通路（精灵 {sprite:?}）")]
+    /// [`crate::sprite::Tone::Matrix`] 没有着色器通路（T12 定案不做，也不静默当无效果）。
+    #[error("Tone::Matrix 无着色器通路（精灵 {sprite:?}）")]
     UnsupportedTone { sprite: SpriteRef },
 }
 
@@ -228,8 +228,11 @@ fn nonzero(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // T12：`cargo xtask wasm-test` 在 wasm 上跑这一组（见 docs/platforms.md）。
     use crate::sprite::{Rect, Tone, Vec2};
     use sisf_render::{Atlas, Blend};
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
 
     /// 一张 `128×128` 页上的 `32×16` 位图；返回位图与其页内矩形。
     fn bitmap_at(w: u32, h: u32) -> sisf_render::Bitmap {

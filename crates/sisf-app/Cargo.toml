@@ -45,5 +45,10 @@ native = ["dep:pollster", "dep:android-activity", "gilrs"]
 gilrs = ["dep:gilrs"]
 # wasm32：wasm-bindgen/web-sys 驱动 + T7 WebAudio pump + T4 fetch loader
 web = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:web-sys", "dep:js-sys"]
-# T12：egui sprite/batch/帧时间面板
-inspector = []
+# 没有 `inspector`：T12 定案不拉 egui（空 feature 就是 DoD-4 禁止的那种壳）。
+# 调试读数走 `Renderer::stats()` + 各示例自带的 HUD，见 docs/bench.md。
+
+# T12：`cargo xtask wasm-test` 的外壳。只在 wasm32 的 dev-dependencies 里，
+# 另两端的依赖面一个字节都没变（`cargo tree -e features` 可复核）。
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test.workspace = true

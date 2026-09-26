@@ -27,3 +27,8 @@ ogg = ["sisf-media/ogg"]
 mp3 = ["sisf-media/mp3"]
 wav = ["sisf-media/wav"]
 midi = ["sisf-media/midi"]
+
+# T12：`cargo xtask wasm-test` 的外壳。只在 wasm32 的 dev-dependencies 里，
+# 另两端的依赖面一个字节都没变（`cargo tree -e features` 可复核）。
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test.workspace = true

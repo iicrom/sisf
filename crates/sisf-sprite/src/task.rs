@@ -629,11 +629,14 @@ fn dir_of(unit: Vec2) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // T12：`cargo xtask wasm-test` 在 wasm 上跑这一组（见 docs/platforms.md）。
     use crate::anim::{AnimDef, AnimState, DirPattern};
     use crate::sprite::Rect;
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::Arc;
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
 
     const TILE: f32 = 32.0;
 

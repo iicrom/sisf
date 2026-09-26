@@ -14,15 +14,30 @@ SpriteArena ──collect(ViewportRef)──▶ BatchList<Instance> ──append
 | 能力 | 本阶段 | 说明 |
 | --- | --- | --- |
 | `Tone::Offset{rgb,gray}` | ✅ | 着色器一条通路：`rgb` 是各通道加法偏移（[-1,1]），`gray` 是与自身亮度的混合比 |
-| `Tone::Matrix([f32;20])` | ❌ 显式报错 | 采集时返回 `CollectError::UnsupportedTone{sprite}`，指认元凶句柄；不静默当无效果（DoD-4） |
+| `Tone::Matrix([f32;20])` | ❌ 显式报错（T12 定案不做） | 采集时返回 `CollectError::UnsupportedTone{sprite}`，指认元凶句柄；不静默当无效果（DoD-4） |
 | `Blend::Normal`（预乘 alpha-over） | ✅ | 管线 1 |
 | `Blend::Add` | ✅ | 管线 2 |
-| `Multiply` / `Screen` | ⏸ 不引入 | `BlendMode = sisf_render::Blend`，与其放一个映射不到的变体，不如等 T12 一起收口（加 pipeline 或删 RGSS 语义） |
+| `Multiply` / `Screen` | ❌ 不移植（T12 定案） | `BlendMode = sisf_render::Blend`，枚举里根本没有这两个变体：一个变体对应一条管线，放进来就是"写得出、画不出"。见下「混合模式与矩阵调色的定案」 |
 | anchor / flip_x / flip_y / rotation / scale | ✅ | 见下 |
 | `src` 子矩形 + 越界裁剪 | ✅ | 裁进位图，不拉伸回来 |
 | 多 viewport / 多 layer | ✅ | `Layer(u8)` + `ViewportRef`，同一 arena 可被多个可视口各采一次 |
 | 动画（`AnimDef` / MoveRoute） | ✅ T8 | 见下"T8：固定拍上的动画与任务" |
-| 位图渲染目标作源（`Sprite::bitmap` 是 RT） | ⏸ T6 | 采集端已与来源解耦（只要 `Bitmap` 有 epoch + 页内 rect） |
+| 位图渲染目标作源（`Sprite::bitmap` 是 RT） | ✅ T6 | 采集端与来源解耦（只要 `Bitmap` 有 epoch + 页内 rect），RT 与图集子图走同一条通路 |
+
+## 混合模式与矩阵调色的定案（T12）
+
+两条挂账到 T12 收口的"二选一"，都选了**删语义**那一侧：
+
+- **`Multiply` / `Screen` 不进 `Blend`。** 一个混合变体对应一条 pipeline（`Blend` 的
+  `as_u8()` 直接参与合批键），塞进枚举就等于允许游戏侧写出"跑得好、画不出来"的帧 —— 而且
+  它静默不报错，因为管线选择发生在 `Renderer` 内部。RGSS 侧的 `blend_type=2/5` 因此在移植层
+  降级，写法和代价记在 `docs/porting.md`。
+- **`Tone::Matrix` 保持报错，不加通路。** 5×4 矩阵既进不了 80B 的 `Instance`（那是逐精灵的
+  tone），也不能塞 per-draw uniform（那会把同一批里不同精灵的调色并成一份）。真要做要给带
+  矩阵的精灵单开一条管线 + 一份矩阵缓冲，本引擎不需要：需要矩阵调色的场合在 CPU 侧改写
+  位图像素（`Bitmap` 的 RT 通路）就够了，且那条路三端一致。
+- **为什么不"静默当无效果"**：那会让 RGSS 移植层写出的调色代码整体失效而没有任何线索，
+  排查成本远高于一次显式报错（T5 事实第 4 条）。`collect` 因此全成败：报错时不留半批实例。
 
 ## 语义
 
@@ -163,7 +178,7 @@ T6 起装箱四周留 `GUTTER = 1px` 复制边（`AtlasLayout` 的 `upload` 矩�
 1. ~~**`Sprite` 没有 `anim` 字段**~~ —— T8 补上了（`Option<AnimState>` + `SpriteArena::tick_anims`），
    采集路径仍然不知道动画存在：换帧只是把 `rect()` 写回 `src`，`collect` 一个分支都没多。
 2. **`BlendMode` 是类型别名**（`= sisf_render::Blend`）而不是新枚举 —— 变体必须与管线一一对应，
-   多出来的 `Multiply/Screen` 无处可去。
+   多出来的 `Multiply/Screen` 无处可去（T12 定案见上「混合模式与矩阵调色的定案」）。
 3. **代号字段叫 `generation` 不叫 `gen`**：edition 2024 把 `gen` 列为保留关键字，
    `SpriteArena{slots, free, generation}` 与 `SpriteRef::generation()` 都受影响（17 处编译错误换来的教训）。
 4. **golden 落在 crate 内**（`crates/sisf-sprite/tests/golden/sprite_scene.png`），不是仓库根

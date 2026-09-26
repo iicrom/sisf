@@ -33,7 +33,7 @@ pub struct Instance {
     pub color: [f32; 4],
     /// 旋转弧度。
     pub rot: f32,
-    /// tone：rgb=偏移（[-1,1]），a=灰度（[0,1]）。
+    /// tone：rgb=偏移（`[-1,1]`），a=灰度（`[0,1]`）。
     pub tone: [f32; 4],
     /// viewport 栈索引 0..7。
     pub layer: f32,
@@ -251,7 +251,10 @@ pub fn create_quad_buffers(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer
 #[cfg(test)]
 mod tests {
     use super::*;
+    // T12：`cargo xtask wasm-test` 在 wasm 上跑这一组（见 docs/platforms.md）。
     use std::mem::offset_of;
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
 
     #[test]
     fn instance_field_offsets_match_stride() {

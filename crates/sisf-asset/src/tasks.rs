@@ -8,7 +8,7 @@
 //! 两端语义：
 //! - [`NativeTasks`]：每个任务一条 `std::thread`（解码是 ms~几十 ms 级的粗任务，
 //!   线程池的调度收益小于复杂度），完成信号走 `mpsc` 回主线程。
-//! - [`WasmTasks`]：协程式——`submit` 只入队（立即返回），`poll_ready` 逐个就地
+//! - `WasmTasks`（只在 wasm32 上存在）：协程式——`submit` 只入队（立即返回），`poll_ready` 逐个就地
 //!   执行（单个解码 ≪ 16ms，超时保护留给 T12 的 perf 门）。网络 fetch 不在这里，
 //!   由 `vfs::WebManifest` 的宿主侧预取完成，保证 `VfsProvider::read` 同步。
 //! - [`load_blocking`]：启动期同步加载——native 就地跑（调用线程即工作线程，

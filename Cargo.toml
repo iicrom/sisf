@@ -64,6 +64,10 @@ web-sys = { version = "0.3", features = [
 js-sys = "0.3"
 android-activity = "0.6"
 cpal = "0.18.2"
+# T12 `xtask wasm-test`：wasm 侧的测试外壳（只在 dev-dependencies 里，且只在 wasm32 target
+# 声明 —— 运行时依赖面一个字节都没多）。配套 runner 是 `.cargo/config.toml` 的
+# `wasm-bindgen-test-runner`，版本与上面 `wasm-bindgen` 钉的 0.2.128 同步。
+wasm-bindgen-test = "0.3.78"
 
 [profile.release]
 opt-level = 3

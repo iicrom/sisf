@@ -98,11 +98,12 @@ impl Rect {
 /// 色彩校正。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Tone {
-    /// 各通道加 `rgb`（[-1,1]），再与自身亮度按 `gray`（[0,1]）混合。着色器的一条通路。
+    /// 各通道加 `rgb`（`[-1,1]`），再与自身亮度按 `gray`（`[0,1]`）混合。着色器的一条通路。
     Offset { rgb: [f32; 3], gray: f32 },
-    /// RGSS 的 5×4 色彩矩阵。**本阶段没有着色器通路**：采集时对它返回
+    /// RGSS 的 5×4 色彩矩阵。**没有着色器通路，采集时显式报错**：[`Tone::Matrix`] 走
     /// [`CollectError::UnsupportedTone`](crate::draw::CollectError)，而不是静默当无效果
-    /// （DoD-4：不留空实现分支）。补通路还是删变体，与 `Multiply/Screen` 一起在 T12 收口。
+    /// （DoD-4：不留空实现分支；静默失效的调色代码排查成本极高，见 `docs/sprite.md`）。
+    /// 需要矩阵调色请在 CPU 侧改写位图像素，或只写 [`Tone::offset`]。
     Matrix([f32; 20]),
 }
 
@@ -132,8 +133,9 @@ impl Tone {
     }
 }
 
-/// 混合模式即管线选择：当前只有 alpha-over 与 additive 两条管线，所以直接用渲染器的
-/// [`Blend`]。`Multiply/Screen` 不在此引入无法映射的变体（T12 二选一，见 `docs/sprite.md`）。
+/// 混合模式即管线选择：`Normal`（alpha-over）与 `Add` 两条管线，加上只为 `clear_rect`
+/// 存在的 `Replace`。它是 [`Blend`] 的别名而不是新枚举 —— 变体必须与管线一一对应，
+/// `Multiply/Screen` 因此不在引擎里出现（T12 定案不移植，理由与替代写法见 `docs/sprite.md`）。
 pub type BlendMode = Blend;
 
 /// viewport 栈索引（0..7）。一个类型同时承担两个角色：`Sprite::layer` 的**归属标签**，
@@ -281,6 +283,9 @@ impl Sprite {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // T12：`cargo xtask wasm-test` 在 wasm 上跑这一组（见 docs/platforms.md）。
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
 
     #[test]
     fn default_is_opaque_visible_main_layer() {

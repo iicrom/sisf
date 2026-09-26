@@ -6,7 +6,7 @@
 //!
 //! 三层各司其职，边界就是"谁需要 GPU"：
 //! - [`FontBundle`]：字体字节 → `FontSystem`（缺失回退默认 + warn 一次）。
-//! - [`layout`]：shaping/换行 → [`TextRun`]（纯 CPU，三端可跑单测）。
+//! - [layout](mod@crate::layout)：shaping/换行 → [`TextRun`]（纯 CPU，三端可跑单测）。
 //! - [`FontAtlas`]：`CacheKey → 覆盖率子矩形`，etagere 装箱 + 自管 `R8Unorm` 页。
 //!
 //! [`TextEngine`] 把三者收在一起，对外只到"往渲染器里画一段文字"。
