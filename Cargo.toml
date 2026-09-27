@@ -40,6 +40,11 @@ jpeg-decoder = "0.3.2"
 image-webp = "0.2.4"
 gif = "0.14.2"
 turbojpeg = "1.5.1"
+# T11 归档 provider（`sisf-rpgmk/archive`，只在非 wasm target 可见）。默认集是九条
+# （aes-crypto/bzip2/deflate64/deflate/lzma/ppmd/time/zstd/xz），而 MV/MZ 工程归档只用
+# deflate；只开 deflate ⇒ 纯 Rust（flate2 + zlib-rs），无 C 工具链。理由登记在
+# todo.md「附：钉版增补」的 T11 那条。
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 ron = "0.12.2"

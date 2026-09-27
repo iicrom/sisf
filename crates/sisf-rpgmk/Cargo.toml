@@ -6,4 +6,30 @@ license.workspace = true
 description = "RPG Maker MV/MZ 移植兼容层（Map/Event translate，不进核心）"
 
 [dependencies]
-sisf-app.workspace = true
+# 指令/条件/变量槽的形状全在 sisf-event：这一层的产物就是它的 `Command` 与 `ActionMap`，
+# 不另造一套中间 IR（否则 T10 的虚拟机与这里会各自漂移）。
+sisf-event.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# 引擎侧存档格式（`GameVars::to_ron`）—— 与 `sisf-event::VarStore` 用的是同一个 ron 版本，
+# 版本仍钉在根 `[workspace.dependencies]`。
+ron.workspace = true
+thiserror.workspace = true
+# 存档插槽（`archive`）要 `VfsProvider`；顺带让 `data/*.json` 能从 VFS 直接读。
+sisf-asset.workspace = true
+
+# 归档插槽：MV 的散文件工程之外，`.zip` 工程包也走同一条 VFS（todo.md T11）。
+# **native only**：wasm 侧的 zip 由宿主 JS 解压后喂 `MemoryProvider`（见 docs/porting.md），
+# 所以这条依赖写在 target 段里，`archive` feature 在 wasm32 上是显式空转。
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+zip = { workspace = true, optional = true }
+
+[features]
+default = []
+# zip 工程包 provider（T11）。开不了的平台（wasm32）上它是 no-op：模块同时门控在
+# `not(target_arch = "wasm32")` 上，见上面的依赖注释。
+archive = ["dep:zip"]
+
+# T12：`cargo xtask wasm-test` 的外壳（本层的翻译/变量/场景全是纯逻辑，四端都该跑）。
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test.workspace = true

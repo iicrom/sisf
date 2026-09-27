@@ -5,3 +5,5 @@ pub mod audio;
 pub mod image;
 #[cfg(feature = "midi")]
 pub mod midi;
+#[cfg(feature = "video")]
+pub mod video;

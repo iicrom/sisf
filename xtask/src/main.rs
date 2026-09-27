@@ -2,7 +2,7 @@
 //!
 //! 子命令：
 //! - `check-all`  feature 组合 `cargo check`（win `--all-features` / wasm32 `web` / android
-//!   `native` / wasm32 `web+全部解码链`，见 `WEB_AUDIO_FEATURES`）
+//!   `native` / wasm32 `web+全部解码链+移植层`，见 `web_features()`）
 //! - `fmt`        `cargo fmt --all`（附加 `--check` 透传）
 //! - `clippy`     workspace clippy（win + wasm，`-D warnings`）
 //! - `web`        构建 wasm 示例（`cargo xtask web [示例名] [--no-serve]`，缺省 `hello_window`）
@@ -26,6 +26,17 @@ const WEB_PORT: u16 = 8080;
 /// 浏览器里就变成"看着动、听着没声"，`audio_demo` 的听测没法做。SoundFont 引擎不附带
 /// （`midi` 只影响能否解 `.mid`，见 `docs/audio.md`）。
 const WEB_AUDIO_FEATURES: &str = "web,ogg,mp3,wav,midi";
+/// T11 起 wasm 侧还要能编"移植层 + 视频桩"那两条腿：`cargo xtask web rpgmv_shell` 用的就是
+/// 这一串（拼在 [`WEB_AUDIO_FEATURES`] 后面）。
+///
+/// 为什么并进**同一条**构建配方而不是给 `rpgmv_shell` 单开一条：CI 上传的是 `web/pkg`，
+/// 本地手测与 CI 必须编的是同一个 feature 集，否则"CI 绿、浏览器里那条 Custom 没落地"
+/// 这种红会分不清是代码还是配方。代价是其余示例也带上这两个 crate 的编译时间。
+const WEB_PORTING_FEATURES: &str = "rpgmk,video";
+/// [`WEB_AUDIO_FEATURES`] 与 [`WEB_PORTING_FEATURES`] 拼成的一串（唯一的拼法，两处共用）。
+fn web_features() -> String {
+    format!("{WEB_AUDIO_FEATURES},{WEB_PORTING_FEATURES}")
+}
 /// 离屏 golden 测试清单：`(crate, 测试文件)`，`cargo xtask golden` 逐个跑。
 const GOLDENS: &[(&str, &str)] = &[
     ("sisf-sprite", "golden_sprite"),
@@ -83,6 +94,12 @@ const WASM_TESTS: &[(&str, &[&str], &[&str], &str)] = &[
         &[],
         &[],
         "command / vars / runner / script + bus / input（事件 VM）",
+    ),
+    (
+        "sisf-rpgmk",
+        &[],
+        &[],
+        "map / translate / game_vars / scene（MV 兼容层纯逻辑）",
     ),
 ];
 /// `sisf-app` 两腿的分法说明（第一腿的 `what` 字段）。
@@ -194,6 +211,7 @@ fn golden(rest: &[String]) -> i32 {
 }
 
 fn check_all() -> i32 {
+    let web_features = web_features();
     let combos: &[(&str, Vec<&str>)] = &[
         (
             "native(宿主)",
@@ -228,7 +246,7 @@ fn check_all() -> i32 {
             ],
         ),
         (
-            "wasm32 音频全开(ogg/mp3/wav/midi)",
+            "wasm32 音频全开 + 移植层(ogg/mp3/wav/midi,rpgmk,video)",
             vec![
                 "check",
                 "-p",
@@ -238,7 +256,7 @@ fn check_all() -> i32 {
                 WASM_TARGET,
                 "--no-default-features",
                 "--features",
-                WEB_AUDIO_FEATURES,
+                &web_features,
             ],
         ),
     ];
@@ -254,10 +272,47 @@ fn check_all() -> i32 {
 }
 
 fn clippy() -> i32 {
+    let web_features = web_features();
     let code = check(&[
         "clippy",
         "--workspace",
         "--all-targets",
+        "--",
+        "-D",
+        "warnings",
+    ]);
+    if code != 0 {
+        return code;
+    }
+    // T11 补的两条腿。为什么第一条 `--workspace --all-targets` 不够：带
+    // `required-features` 的 target 在 feature 不满足时是**静默跳过**，于是
+    // `rpgmv_shell`（要 `image,ogg,video,rpgmk`）连同它的单测、以及 `sisf-rpgmk` 的
+    // `archive` 模块（要 `archive`）在闸门里隐身 —— 实测：`crates/sisf/src/video.rs`
+    // 的一个 `doc_lazy_continuation` 就藏在那儿绿过去了。这两条用的是 `check_all`
+    // 第 1 / 第 4 组同样的 feature 口径（宿主 `--all-features`、wasm `web_features()`），
+    // 只是把 check 换成 clippy；与测试闸门 `cargo test --workspace --all-features` 对齐。
+    let code = check(&[
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings",
+    ]);
+    if code != 0 {
+        return code;
+    }
+    let code = check(&[
+        "clippy",
+        "-p",
+        "sisf",
+        "--all-targets",
+        "--target",
+        WASM_TARGET,
+        "--no-default-features",
+        "--features",
+        &web_features,
         "--",
         "-D",
         "warnings",
@@ -497,6 +552,7 @@ fn web(rest: &[String]) -> i32 {
         }
     }
     let example = example.unwrap_or("hello_window");
+    let features = web_features();
     // release：debug 的 `tiled_map_bg.wasm` 是 32.5MB、release 8.2MB，而软件 WebGL 下每毫秒都值钱
     // —— 浏览器侧量到的"节拍噪声"有一半就是这个没优化的产物。诊断通道不受档位影响：
     // panic 钩子在 `platform/wasm.rs` 里无条件安装。
@@ -511,7 +567,7 @@ fn web(rest: &[String]) -> i32 {
         WASM_TARGET,
         "--no-default-features",
         "--features",
-        WEB_AUDIO_FEATURES,
+        &features,
     ]);
     if code != 0 {
         return code;

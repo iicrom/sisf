@@ -39,4 +39,12 @@ ogg-lewton = ["dep:lewton"]
 # MIDI：midly 解析 SMF + rustysynth 的 SF2 合成器（引擎不带 SoundFont，见 midi.rs）
 midi = ["dep:midly", "dep:rustysynth"]
 # 占位 feature：对应解码依赖在 T11（视频）阶段接线
+# T11 定案：桩**不拉任何解码依赖**（ffmpeg 留给真实交付）。这一层只有容器识别与
+# `VideoSource` 接口；持 `Bitmap` 的 `VideoPlayer` 在门面 `sisf::video`（包级图上
+# `render → asset → media`，media 反向依赖 render 是环）。
 video = []
+
+# T12：`cargo xtask wasm-test` 的外壳。只在 wasm32 的 dev-dependencies 里，
+# 另两端的依赖面一个字节都没变（`cargo tree -e features` 可复核）。
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test.workspace = true

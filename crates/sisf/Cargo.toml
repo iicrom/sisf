@@ -35,8 +35,11 @@ wav = ["dep:sisf-media", "sisf-media/wav", "sisf-audio/wav"]
 # 启用：sisf-media/midi → midly + rustysynth（T7）。**必须**透传给 sisf-audio：
 # `AudioBus::play_midi` 就门控在它自己的 `midi` 上，只开 sisf-media 会连方法都看不见。
 midi = ["dep:sisf-media", "sisf-media/midi", "sisf-audio/midi"]
-# 启用：sisf-media/video → native ffmpeg-next / web video 胶水（T11 桩）
-video = ["dep:sisf-media", "sisf-media/video"]
+# 启用：视频（T11 桩：两端都返回 Unsupported，只保留 API 与文档）。
+# 为什么带 image：`VideoPlayer` 的纹槽是 `render::Bitmap`，而那个类型整个门控在
+# `sisf-render/image` 后面 —— 少了它连签名都写不出来（解码接口本身不需要，见
+# `crates/sisf-media/src/video.rs` 的 feature 说明）。
+video = ["dep:sisf-media", "sisf-media/video", "image"]
 # 没有 `inspector`：T12 定案不引 egui 调试面板（`sisf-app` 那边同步删掉了空 feature）。
 # 启用：sisf-rpgmk 兼容层（T11）
 rpgmk = ["dep:sisf-rpgmk"]
@@ -103,3 +106,15 @@ required-features = ["image"]
 name = "vn_demo"
 path = "../../examples/vn_demo.rs"
 test = true
+
+# T11 的移植可行性证明点：吃一份**散文件 MV 工程**（`data/*.json` + `graphics/` + `audio/`），
+# 走完整链 —— 进图、走动、触发事件、播 BGM。feature 面就是这条链的依赖闭包：
+# `image`（图块/行走图解码）、`ogg`（bgm/se/me 三条都是 ogg，缺一条就播不出）、
+# `rpgmk`（`MapDef`/`Scene_Map`/`translate`）、`video`（`rpgmv.movie` 那条 Custom 要落到
+# 视频桩上 —— 桩是 DoD-4 唯一被点名的例外）。`test = true`：判据是"这份工程真的编得过、
+# 翻译账单真的只欠 251"，跑的是文件内那 9 条几何/翻译/页选择/遮挡单测。
+[[example]]
+name = "rpgmv_shell"
+path = "../../examples/rpgmv_shell.rs"
+test = true
+required-features = ["image", "ogg", "video", "rpgmk"]

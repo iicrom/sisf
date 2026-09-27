@@ -13,7 +13,8 @@ description: 在 SISF 引擎上写新示例/游戏应用：facade 与 feature �
 `default = ["native"]`（`crates/sisf/Cargo.toml:20`）。按需：`web`（wasm 平台腿）、
 `image`（解码链，native/web 各自透传）、`gif`、`ogg`/`mp3`/`wav`/`midi`（音频解码，
 **`midi` 必须同时透传 sisf-audio 才看得到 `AudioBus::play_midi`**）、`video`（T11 桩）、
-`rpgmk`（**空壳，T11 未实装，不可依赖**）、`simd-jpeg`（native only）。
+`rpgmk`（T11 已实装：`sisf::rpgmk::map/translate/game_vars/scene`，MV `System.json` 的
+键位表走 `rpgmk::map::action_map()`；zip 归档在 native-only 的 `archive` feature 里）、`simd-jpeg`（native only）。
 `inspector` 已定案移除。
 
 ## App trait：4 个方法，不是 3 个

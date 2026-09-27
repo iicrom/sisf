@@ -80,8 +80,9 @@
 //!   显式报错 —— 两条都是 T12 的定案，理由见 `docs/sprite.md`。
 //! - **合批键 `(layer, clip, epoch, blend, z, insertion)`**：`z` 只在同批次内有决定权
 //!   （`docs/sprite.md`），HUD 要盖住地图得靠 viewport 层而不是大 `z`。
-//! - **平台不支持的能力是 feature 关掉的**，不是空实现：视频是 T11 的桩，SF2 与中文字形
-//!   由宿主自备（`docs/porting.md`）。
+//! - **平台不支持的能力是 feature 关掉的**，不是空实现：视频是 T11 的桩
+//!   （[`video::VideoPlayer`] 的每个入口都显式失败），SF2 与中文字形由宿主自备
+//!   （`docs/porting.md`）。
 
 pub use sisf_app as app;
 pub use sisf_asset as asset;
@@ -104,3 +105,6 @@ pub use sisf_text as text;
 
 #[cfg(feature = "rpgmk")]
 pub use sisf_rpgmk as rpgmk;
+
+#[cfg(feature = "video")]
+pub mod video;

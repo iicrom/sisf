@@ -11,10 +11,14 @@
 //!   经 `WebManifest::insert` 灌进内部 [`MemoryProvider`]，`VfsProvider::read`
 //!   因此永远是同步的。清单未就绪的路径表现为"不存在"，应用侧下一帧重试。
 //!
-//! 规划中的 provider（本阶段只登记接口，不实装）：
-//! - `ZipProvider`：RPG Maker `*.zip` 工程包（`zip` crate，读内存切片）。
+//! 归档 provider 在移植层，不在这里：
+//! - `ZipProvider`（T11，**native only**，见 `sisf-rpgmk::archive`）：把 `.zip` 工程包按
+//!   中央目录建索引后挂进来。它不进 `sisf-asset` 是因为 `zip` 这条依赖在 wasm 上根本
+//!   没有意义（没有 `std::fs`，随机读要 `Seek`），而 asset 是四端都编的核心 crate。
+//!
+//! 仍未实装的 provider（只登记接口，见 `docs/porting.md`）：
 //! - `RgssadProvider`：VX/RGSS 加密包（手写 XOR+meta 解密，纯字节操作）。
-//!   两者的入口形状与 `MemoryProvider` 相同（构造期拿到全 `&[u8]` 或预建索引），
+//!   它的入口形状与 `MemoryProvider` 相同（构造期拿到全 `&[u8]` 或预建索引），
 //!   不需要 `VfsProvider` trait 变化。
 
 use std::collections::HashMap;
