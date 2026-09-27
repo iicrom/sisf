@@ -79,3 +79,27 @@ name = "dialog_demo"
 path = "../../examples/dialog_demo.rs"
 test = true
 required-features = ["image", "ogg", "mp3", "wav"]
+
+# 简易 RPG demo：地图/人物/对话走事件虚拟机（内联 RON），菜单与回合战斗是纯游戏侧状态机。
+# 不碰位图与音频 ⇒ 无 required-features；`test = true` 跑地图连通、脚本编译与战斗数学。
+[[example]]
+name = "rpg_demo"
+path = "../../examples/rpg_demo.rs"
+test = true
+
+# 横向动作 demo：马里奥 1-1 式地图 + 逐拍整数像素物理（跑/跳/火球/踩敌）。
+# `image` 是同 `tiled_map` 的程序生成位图 → 图集上传链；`test = true` 跑地图形状、
+# 地标实心、跳升程与头撞选格这些物理判据。
+[[example]]
+name = "platformer"
+path = "../../examples/platformer.rs"
+test = true
+required-features = ["image"]
+
+# 简易视觉小说 demo：三场景（黑幕换幕）+ 会分叉的剧情图，角色进出场归事件表。
+# 背景与角色全是程序生成的色块，不碰位图与音频 ⇒ 无 required-features；
+# `test = true` 跑五份内联剧本编译、剧情图连通收口、选项/开关对账与黑幕拍数数学。
+[[example]]
+name = "vn_demo"
+path = "../../examples/vn_demo.rs"
+test = true
