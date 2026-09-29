@@ -701,10 +701,10 @@ impl Mixer {
                 error.get_or_insert(e);
             }
         }
-        for i in 0..OWNED {
+        for slot in &mut self.slots {
             // `dead` 的语音本块仍然出过力，混完这一步才回收。
-            if self.slots[i].as_ref().is_some_and(|v| v.dead) {
-                self.slots[i] = None;
+            if slot.as_ref().is_some_and(|v| v.dead) {
+                *slot = None;
             }
         }
         for v in &mut self.tails {

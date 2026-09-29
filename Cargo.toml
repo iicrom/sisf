@@ -6,7 +6,6 @@ members = ["crates/*", "xtask"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-rust-version = "1.85"
 
 [workspace.dependencies]
 # --- internal crates ---
@@ -19,7 +18,8 @@ sisf-media = { path = "crates/sisf-media" }
 sisf-audio = { path = "crates/sisf-audio" }
 sisf-app = { path = "crates/sisf-app", default-features = false }
 sisf-rpgmk = { path = "crates/sisf-rpgmk" }
-sisf = { path = "crates/sisf" }
+# 注：不再声明 `sisf = { path = "crates/sisf" }` —— 门面 crate 没有任何 workspace 成员依赖它
+# （示例是它自己的 `[[example]]`），最新 cargo 会把它判成 `unused workspace dependency`。
 
 # --- pinned third-party (设计文档 §依赖钉版) ---
 wgpu = { version = "30.0.1", features = ["webgl"] }
@@ -45,6 +45,13 @@ turbojpeg = "1.5.1"
 # deflate；只开 deflate ⇒ 纯 Rust（flate2 + zlib-rs），无 C 工具链。理由登记在
 # todo.md「附：钉版增补」的 T11 那条。
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+# JS 第二脚本语言运行时（T11 续：`sisf-event/js`）。native = rquickjs（quickjs-ng），
+# wasm = 浏览器自带引擎（js-sys，零新 crate）。钉 0.11.0：它是 rust-version=1.85 之上
+# 最新的一条（0.12+ 要 1.87，超了 workspace 声明的 MSRV）。
+# ⚠️ `rquickjs-sys` 用 `cc` 编 quickjs-ng 的 C —— **这是本仓库第一个 C 依赖**，但它整个
+# 门控在可选 `js` feature 后面（不在 default/native/web 里），所以默认构建仍然一行 C 都不编。
+# 只开 `std`：closure/`Function` API 够用，不拉 `macro`（proc-macro）/`either`/`indexmap`。
+rquickjs = { version = "0.11.0", default-features = false, features = ["std"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 ron = "0.12.2"

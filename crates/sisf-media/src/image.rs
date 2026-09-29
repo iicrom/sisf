@@ -111,7 +111,7 @@ pub fn decode_image(bytes: &[u8]) -> Result<ImageData> {
 
 /// 非预乘 RGBA8 → 预乘（(c*a+127)/255 四舍五入）。alpha=255 的像素直接跳过。
 fn premultiply(pixels: &mut [u8]) {
-    for px in pixels.chunks_exact_mut(4) {
+    for px in pixels.as_chunks_mut::<4>().0 {
         let a = px[3];
         if a == 255 {
             continue;
@@ -126,7 +126,7 @@ fn premultiply(pixels: &mut [u8]) {
 fn rgba_from_rgb(rgb: Vec<u8>) -> Vec<u8> {
     debug_assert!(rgb.len().is_multiple_of(3));
     let mut out = Vec::with_capacity(rgb.len() / 3 * 4);
-    for px in rgb.chunks_exact(3) {
+    for px in rgb.as_chunks::<3>().0 {
         out.extend_from_slice(&[px[0], px[1], px[2], 255]);
     }
     out
@@ -158,7 +158,7 @@ fn decode_png(bytes: &[u8]) -> Result<ImageData> {
         png::ColorType::Grayscale => rgba_from_gray(buf),
         png::ColorType::GrayscaleAlpha => {
             let mut out = Vec::with_capacity(buf.len() * 2);
-            for ga in buf.chunks_exact(2) {
+            for ga in buf.as_chunks::<2>().0 {
                 out.extend_from_slice(&[ga[0], ga[0], ga[0], ga[1]]);
             }
             out

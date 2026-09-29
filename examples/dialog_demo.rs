@@ -1360,7 +1360,7 @@ mod tests {
                         if *actor == HERO
                 ),
                 "方向 {dir} 走的不是玩家的阻塞 `MoveRoute`: {:?}",
-                &prog.code[0]
+                prog.code[0]
             );
             assert_eq!(dir_of_action("up"), Some(DIR_UP), "对照表不该在循环里变");
         }

@@ -39,6 +39,17 @@ cargo xtask golden            # 离屏像素基线；--bless 重写
 `cargo doc --no-deps --workspace --all-features` 输出里没有 `warning:` 是 T12 定的判据，
 但它**没有**接进 CI/xtask；攒了 rustdoc 警告就顺手清掉，别等闸门。
 
+## 工具链（动它之前必须先问）
+
+- **动工具链（`rustup install/update/default/target add` 等）之前先征求同意**，别自作主张装/换。
+- **本项目不考虑旧工具链兼容。** 判定基准永远跟着本地最新走：
+  - 本地工具链 **低于** 项目需要 → 把**本地更新到最新**（`rustup update`）。
+  - 项目声明的工具链/MSRV **低于** 本地 → **更新项目**去适配最新（改 `rust-version`、修新 lint/新
+    告警），**绝不**为图省事把本地退回旧 nightly 或钉一个 dated nightly 来"复现旧绿"。
+  - 后果：新版 clippy/rustc 给既有代码带来的新 lint（如某版本新加的 `chunks_exact_to_as_chunks`、
+    新的 cargo manifest 告警）算**项目要修的账**，不是"环境漂移、与我无关"可以跳过的红。
+- 这条是被教训出来的：曾为了跑绿擅自装了一堆 dated nightly（1.92/1.93/1.95/…），方向正好反了。
+
 ## 定案，不要重开
 
 - **没有 `inspector` feature**。T12 定案不引 egui 调试面板：它当时已经是"开了什么都不发生"的空

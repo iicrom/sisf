@@ -118,6 +118,11 @@ use sisf::sprite::{
 use sisf::text::{Align, FontBundle, TextEngine, TextStyle};
 use sisf::video::VideoPlayer;
 
+// JS 第二脚本语言运行时（T11 续）。关着 `js` feature 时这两行都不存在，示例退回今天的行为：
+// `355`/`356` 因为后端不认名字而各登记一条告警（见下方 `ShellBackend` 的落点说明）。
+#[cfg(feature = "js")]
+use sisf::event::js::{JsBridge, MVState};
+
 // ---------------------------------------------------------------- 几何与时钟
 
 /// 图块边长（虚拟像素）。MV 的图块是 48×48，而 `translate` 的速度换算用的就是同一个数 ——
@@ -739,6 +744,44 @@ impl ScriptBackend for ShellBackend {
 
 // ---------------------------------------------------------------- 示例本体
 
+/// `js` 开着时把两条后端串起来：先让 [`JsBridge`] 认领它的主题（`rpgmv.script`/`rpgmv.plugin`），
+/// 不认的（`rpgmv.movie`/`transfer`/`unimplemented`/`face`）再落到 [`ShellBackend`]。
+///
+/// 为什么要串而不是二选一：这两条链各管一段 MV 语义——js 桥把脚本翻成引擎指令、ShellBackend
+/// 接住引擎没有通路的那几条并"说话而不是沉默"。`command` 用 `or_else` 保证**顺序即优先级**：
+/// 只有 js 桥返回 `None`（"这个名字我不认"）才轮到 shell，两边都不认才由 VM 登记告警。
+#[cfg(feature = "js")]
+struct MvBackend {
+    js: JsBridge,
+    shell: ShellBackend,
+}
+
+#[cfg(feature = "js")]
+impl MvBackend {
+    fn new(js: JsBridge, shell: ShellBackend) -> Self {
+        Self { js, shell }
+    }
+}
+
+#[cfg(feature = "js")]
+impl ScriptBackend for MvBackend {
+    fn start(&mut self, entry: &str) {
+        self.js.start(entry);
+        self.shell.start(entry);
+    }
+
+    fn tick(&mut self, ctx: &mut EventCtx, queue: &mut Vec<Submission>) {
+        self.js.tick(ctx, queue);
+        self.shell.tick(ctx, queue);
+    }
+
+    fn command(&mut self, name: &str, args: &[Param]) -> Option<Arc<Program>> {
+        self.js
+            .command(name, args)
+            .or_else(|| self.shell.command(name, args))
+    }
+}
+
 /// 一个事件的"画法缓存"：换页才重建动画与位图。
 struct View {
     sprite: SpriteRef,
@@ -801,12 +844,27 @@ struct RpgmvShell {
     warnings: u32,
     font: String,
     erased: u32,
+    /// js 桥的只读状态把手。后端被 `EventRunner` 独占后，示例仍握着这个 `Rc` 每拍把
+    /// `$gameMap`/`$gamePlayer` 的当前值刷进去（脚本在 `command()` 里读它）。仅 `js` feature 下存在。
+    #[cfg(feature = "js")]
+    mv_state: Rc<RefCell<MVState>>,
 }
 
 impl RpgmvShell {
     fn new() -> Self {
         let status = Rc::new(RefCell::new(String::from("nothing yet")));
-        let vm = EventRunner::new().with_script(Box::new(ShellBackend::new(Rc::clone(&status))));
+        // `js` 开着就串一条 MvBackend（js 桥在前、ShellBackend 在后）并把 js 桥的只读状态
+        // 把手留在手里；关着就还是今天那条纯 ShellBackend 链。
+        #[cfg(feature = "js")]
+        let mv_state = Rc::new(RefCell::new(MVState::default()));
+        #[cfg(feature = "js")]
+        let backend: Box<dyn ScriptBackend> = Box::new(MvBackend::new(
+            JsBridge::with_state(Rc::clone(&mv_state)),
+            ShellBackend::new(Rc::clone(&status)),
+        ));
+        #[cfg(not(feature = "js"))]
+        let backend: Box<dyn ScriptBackend> = Box::new(ShellBackend::new(Rc::clone(&status)));
+        let vm = EventRunner::new().with_script(backend);
         Self {
             assets: Assets::new(),
             art: Art::new(),
@@ -841,6 +899,8 @@ impl RpgmvShell {
             warnings: 0,
             font: String::new(),
             erased: 0,
+            #[cfg(feature = "js")]
+            mv_state,
         }
     }
 
@@ -1375,6 +1435,22 @@ impl RpgmvShell {
     /// 而 `GameVars::store_mut()` 本身就是"可能改了"的记号 —— 所以每拍把旗立起来，
     /// 由下一拍开头的 `world.tick` 消费（MV 的 `requestRefresh` 也是延后一拍）。
     fn run_vm(&mut self) -> RunnerStatus {
+        // `js` 开着：把玩家/地图的当前值刷进桥的只读状态，脚本这一拍读 `$gameMap`/`$gamePlayer`
+        // 才拿得到实时的数（桥已被 `EventRunner` 独占，只能靠这个握在手里的 `Rc` 回灌）。
+        #[cfg(feature = "js")]
+        if let Some(world) = self.world.as_ref()
+            && let Some(pc) = world.get(PLAYER)
+        {
+            *self.mv_state.borrow_mut() = MVState {
+                map_id: world.map_id(),
+                map_width: world.map().width,
+                map_height: world.map().height,
+                player_x: pc.x as i64,
+                player_y: pc.y as i64,
+                player_direction: pc.dir as i64,
+                player_moving: false,
+            };
+        }
         let Self {
             arena,
             tasks,
@@ -1976,6 +2052,58 @@ mod tests {
         );
         // HUD 那句 ASCII 摘要要把降级码带出来（wasm 没中文字形时它是唯一的读数）。
         assert!(ascii_summary(&total).contains("251x1"));
+    }
+
+    /// 验收（T11 续）：钟声事件里那条 **真的 355 脚本** 经 `translate` → `rpgmv.script` → js 桥，
+    /// 落成引擎自己的 `SetVar` + 一条交宿主的 `Custom("rpgmv.transfer")` —— 而不是今天那样被
+    /// 判成"后端不认名字"跳过。这一条只走 `command()`（不碰 `EventCtx`），引擎无关、headless，
+    /// 所以 native 与 wasm 两条腿都能跑到同样的断言。
+    #[cfg(feature = "js")]
+    #[test]
+    fn bell_script_lands_through_the_js_bridge() {
+        use sisf::event::{Command, Expr, Instr, SetOp, Slot};
+        let a = vfs();
+        let map = MapDef::load(&a.vfs, 1).unwrap();
+        let opts = Options {
+            tick_hz: TICK_HZ as u32,
+            tile_px: TILE,
+        };
+        // 钟声是事件 3；它的 trigger-3 那一页（pages[1]）被我塞进了一条 355。
+        let (def, _rep) = translate_event(map.event(3).unwrap(), 1, opts);
+        let args = def.pages[1]
+            .iter()
+            .find_map(|c| match c {
+                Command::Custom(name, args) if name == "rpgmv.script" => Some(args.clone()),
+                _ => None,
+            })
+            .expect("钟声页应翻出一条 rpgmv.script（那条 355 没落地）");
+
+        let mut bridge = JsBridge::new();
+        let prog = bridge
+            .command("rpgmv.script", &args)
+            .expect("js 桥必须认领 rpgmv.script");
+        let leaves: Vec<Command> = prog
+            .code
+            .iter()
+            .filter_map(|i| match i {
+                Instr::Run(c) => Some(c.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            leaves.contains(&Command::SetVar {
+                slot: Slot::Int(1),
+                op: SetOp::Set,
+                value: Expr::Lit(7),
+            }),
+            "脚本里的 setValue(1,7) 没落成 SetVar：{leaves:?}"
+        );
+        assert!(
+            leaves
+                .iter()
+                .any(|c| matches!(c, Command::Custom(n, _) if n == "rpgmv.transfer")),
+            "脚本里的 transferPlayer 没回成给宿主的 transfer：{leaves:?}"
+        );
     }
 
     /// 页条件真的能选页：长老两页（自我开关 A）、石碑两页（开关 3）。

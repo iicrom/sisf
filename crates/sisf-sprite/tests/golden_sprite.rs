@@ -321,7 +321,13 @@ fn compare_golden(pixels: &[u8]) {
     assert_eq!(base.len(), pixels.len(), "基线字节数不符");
     let mut worst = 0i32;
     let mut first: Option<(u32, u32, [u8; 4], [u8; 4])> = None;
-    for (i, (a, b)) in base.chunks_exact(4).zip(pixels.chunks_exact(4)).enumerate() {
+    for (i, (a, b)) in base
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(pixels.as_chunks::<4>().0.iter())
+        .enumerate()
+    {
         let (a, b) = ([a[0], a[1], a[2], a[3]], [b[0], b[1], b[2], b[3]]);
         for c in 0..4 {
             worst = worst.max((a[c] as i32 - b[c] as i32).abs());

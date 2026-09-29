@@ -46,7 +46,7 @@ provider（§9）。这篇文档 T12 起草时它们还只是计划，所以 §1
 | 转移玩家 / 车辆 / 位置登记 | `201` → `Custom("rpgmv.transfer", [6 个参数])`；其余同类码 ⏸ 未建模 | **场景栈归宿主**：`examples/rpgmv_shell.rs` 收到 `rpgmv.transfer` 才换 `Scene_Map` |
 | 商店处理 / 战斗处理 / 游戏结束 | ⏸ 未建模 → 降级 + **整块丢掉缩进体**（计数在 `TranslateReport::dropped_branch_lines`） | 需要 UI 与存档层，引擎不提供；"把 `then` 提到外层"会直接改剧情，所以宁可丢 |
 | 播放影片 | `261` → `Custom("rpgmv.movie", [文件名])` | 播放器是桩：`VideoPlayer::open` 恒 `Unsupported`，宿主调 `VideoPlayer::skip_notice()` 拿"只播一次"的文案后继续（§9） |
-| 脚本（Ruby / JS） | `Custom(name, args)` | **脚本不进这台虚拟机**：`ScriptBackend` 收到 `Custom` 自己解释；后端不认得该 `name` ⇒ 登记告警后继续，不静默。`355`/`356` 分别给 `rpgmv.script`/`rpgmv.plugin` |
+| 脚本（Ruby / JS） | `Custom(name, args)` | **脚本不进这台虚拟机**：`ScriptBackend` 收到 `Custom` 自己解释；后端不认得该 `name` ⇒ 登记告警后继续，不静默。`355`/`356` 分别给 `rpgmv.script`/`rpgmv.plugin`。T11 续提供了实现这两条主题的后端：`sisf_event::js::JsBridge`（`js` feature）把 JS 的**写请求**翻成引擎自己的 `Command`（`$gameVariables.setValue` ⇒ `SetVar`、`SISF.playBgm` ⇒ `PlayBgm`…）随返回的 `Program` 交 VM 执行，控制流与存档模型一字未改 |
 
 > `sisf-event` 里唯一认识 JSON 的是 [`Param::from_json`](crates/sisf-event/src/command.rs)
 > （`serde_json::Value` → `Param` 的四态折叠）。**没有**第二个"MV 指令解码器"藏在引擎里：
@@ -265,3 +265,67 @@ impl sisf_asset::VfsProvider for RgssadProvider {
 `261`（`Custom("rpgmv.movie", …)`）用 `VideoPlayer::skip_notice()` 取"只说一次"的文案后继续播，
 不 panic、不静默。真后端要补的两条路（每帧新页 / 给 `Bitmap` 加写回）写在 `crates/sisf/src/video.rs`
 的模块文档里。
+
+## 10. JS 第二脚本语言运行时（`sisf-event/js`，T11 续）
+
+MV 的事件页里 `355`（脚本）与 `356`（插件命令）塞的是原始 JavaScript。兼容层把 `355` 的多行源码
+拼成一条 `Command::Custom("rpgmv.script", [Param::Text(js)])`，`356` 拼成 `Custom("rpgmv.plugin",
+[Param::Text(name)])`；认领这两条主题的后端是 `sisf_event::js::JsBridge`（`js` feature）。
+
+```rust
+use sisf::event::{EventRunner, ScriptBackend};
+use sisf::event::js::JsBridge;
+// 后端被 EventRunner 独占后，游戏侧仍握着这个 Rc 每拍刷 $gameMap/$gamePlayer 的当前值。
+let vm = EventRunner::new().with_script(Box::new(JsBridge::new()));
+```
+
+装法与 `NullScriptBackend` 一致，**虚拟机一行不用改**（这正是 `ScriptBackend` 当初留的那个口子）。
+
+### 10.1 控制流仍归虚拟机（这是这层的承重墙）
+
+`ScriptBackend::command` 拿不到 `EventCtx`，所以 JS 无权直接改世界。它能做的每件事都落成两种：
+
+- **写请求 → 编成引擎指令**：`$gameVariables.setValue(5,12)` ⇒ `Command::SetVar{slot:Int(5), value:Lit(12)}`，
+  `SISF.playBgm("Boss01")` ⇒ `PlayBgm`，`SISF.showText(...)` ⇒ `ShowText`（由 VM 挂起等按键）。
+  它们随返回的 `Program` 由**虚拟机在归属事件的上下文里**执行 ⇒ 进存档、走 VM 的分支，存档模型一字未改。
+- **读请求 → 从后端自持的镜像取**：`$gameVariables.value(id)` 走一份 `ctx.vars` 的镜像，`$gameMap.*`/
+  `$gamePlayer.*` 走 [`MVState`]（`map_id/map_width/map_height/player_x/player_y/player_direction/player_moving`，
+  由宿主每拍经 `state_handle()` 回灌）。
+
+引擎没有"地图"这一层（地图归 `sisf-rpgmk`），所以 `MVState` 只是一组扁平的数 —— 谁在跑 MV 谁负责填。
+
+### 10.2 延后一拍（与 T11 的 `requestRefresh` 对齐，不是妥协）
+
+写请求在脚本执行当拍就落到镜像、并编成指令随 `Program` 交回；VM 这一拍末尾执行它们。镜像在**每拍
+`tick()` 开头**从 `ctx.vars` 整体重同步。于是"一段脚本内先 set 后 value"读得到自己刚写的值，跨脚本/跨拍
+的读写在**下一拍边界**对齐 —— 这与 MV 自己的 `Game_Map.requestRefresh` 延后一拍是同一个形状。
+
+### 10.3 双端两颗引擎，一份账本
+
+native = rquickjs（quickjs-ng），wasm = 浏览器自带引擎（`js_sys::eval`）。prelude 与账本解析引擎无关，
+两颗引擎只差 `Engine::exec`/`read_output` 两个动作。**"同一份脚本 → 同一份 `Vec<Command>`"不是靠看着像，
+而是同一组断言在两条腿上各跑一遍**（`crates/sisf-event/src/js/tests.rs`，`cargo xtask wasm-test` 的 js 腿 + 宿主 `cargo test`）。
+
+会咬人的地方，都是这条判据当场逮出来的：
+
+- **顶层 JS 绑定一律显式挂 `globalThis`**。`js_sys::eval` 每次调用给它的 `var` 一个**一次性**作用域、不落到
+  全局，而 QuickJS 的 `ctx.eval` 是 global 求值、`var` 直接成全局 —— 两腿这处行为不同。prelude 里 `$game*`/`SISF`
+  与注入的 `__sisfIn`/`__V` 全部写 `globalThis.xxx`，否则在浏览器里 `$gameVariables is not defined`。
+- **prelude 只用 ES5.1 子集**（无 `let/const/=>`）：不是迁就 quickjs-ng（它支持 ES2023），而是钉死"两腿共同
+  真子集"，让同一份门面代码在两引擎逐字一致。
+- **`SISF.randomInt` 不碰引擎的 `Math.random`**：走 Rust 侧 splitmix64 预抽的 `__sisfIn.rand` 批量数 + JS 整数游标。
+  V8 与 quickjs-ng 的 `Math.random` 天生不同源，用它会永久破坏双端一致。超过一批（64 个）确定性回卷。
+- **数字按 `i64` 截断**：JS 数字是 double，`setValue(5, 7.9)` 折成 `Lit(7)`；`NaN`/无穷折成 0（配置写错不该卡事件，
+  与 `Expr::Div` 除零取 0 同一立场）。变量号超 `u32` 会被账本 parser 拒成一条错误 ⇒ 整段降级成空程序，不 panic。
+- **不认的 `name` 仍返回 `None` ⇒ VM 登记告警**：`rpgmv.script`/`rpgmv.plugin` 之外的主题（`rpgmv.movie`/
+  `rpgmv.transfer`/`rpgmv.unimplemented`）js 桥不认领，交给宿主自己的后端（`examples/rpgmv_shell.rs` 里用
+  `MvBackend` 把 `JsBridge` 串在 `ShellBackend` 前，`command` 用 `or_else` 保优先级）。
+
+### 10.4 依赖面与 feature
+
+`js` 是**可选、非默认** feature（`crates/sisf/Cargo.toml` 的 `js = ["sisf-event/js"]`）。它把 `rquickjs` 关在
+`sisf-event` 的 `[target.'cfg(not(target_arch="wasm32"))'.dependencies]` 里 —— **默认构建仍然一行 C 都不编**，
+`rquickjs-sys` 的 `cc` 只在开了 `js` 且非 wasm 时进依赖图。DoD-4：平台没有的那条腿（wasm 用宿主引擎，不拉
+rquickjs）靠 feature/target 分开，不留空实现。
+
+[`MVState`]: crates/sisf-event/src/js/engine.rs

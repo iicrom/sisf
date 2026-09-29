@@ -419,7 +419,11 @@ def bell():
     """事件 3「远处的钟声」：自动执行（trigger 3）的一页写开关 4 ON，另一页是它后面的
     空页 ⇒ 开关一开，`refresh` 取到的是那一页，这个事件就从图上消失（同时也不再重跑）。
     列表本身走 `221` 淡出 → 文字 → `250` SE → `121` → `222` 淡入。"""
-    lst = [cmd(221, 0, [])] + say(["（远处传来一声钟响。）"]) + [
+    # T11 续：页首塞一条真的 `355` 脚本，用来演示 JS 第二脚本语言运行时——它会翻成
+    # `Custom("rpgmv.script", …)`，经 js 桥落成 `SetVar(Int 1 = 7)` + `Custom("rpgmv.transfer", …)`
+    # （后者 js 桥不认领 ⇒ 落到 ShellBackend ⇒ HUD 第三行变 "transfer ignored"，双端可观测）。
+    js = "$gameVariables.setValue(1, 7); SISF.transferPlayer(2, 12, 8);"
+    lst = [cmd(355, 0, [js, 0]), cmd(221, 0, [])] + say(["（远处传来一声钟响。）"]) + [
         cmd(250, 0, [audio_ref("Confirm01", 70)]),
         cmd(121, 0, [4, 4, 0]),
         cmd(222, 0, []),

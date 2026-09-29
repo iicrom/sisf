@@ -27,12 +27,13 @@ const WEB_PORT: u16 = 8080;
 /// （`midi` 只影响能否解 `.mid`，见 `docs/audio.md`）。
 const WEB_AUDIO_FEATURES: &str = "web,ogg,mp3,wav,midi";
 /// T11 起 wasm 侧还要能编"移植层 + 视频桩"那两条腿：`cargo xtask web rpgmv_shell` 用的就是
-/// 这一串（拼在 [`WEB_AUDIO_FEATURES`] 后面）。
+/// 这一串（拼在 [`WEB_AUDIO_FEATURES`] 后面）。T11 续再加 `js`：wasm 侧的 JS 运行时腿
+/// （`sisf-event/js` = js-sys，用浏览器自带引擎，不拉 rquickjs 那条 C）。
 ///
 /// 为什么并进**同一条**构建配方而不是给 `rpgmv_shell` 单开一条：CI 上传的是 `web/pkg`，
 /// 本地手测与 CI 必须编的是同一个 feature 集，否则"CI 绿、浏览器里那条 Custom 没落地"
 /// 这种红会分不清是代码还是配方。代价是其余示例也带上这两个 crate 的编译时间。
-const WEB_PORTING_FEATURES: &str = "rpgmk,video";
+const WEB_PORTING_FEATURES: &str = "rpgmk,video,js";
 /// [`WEB_AUDIO_FEATURES`] 与 [`WEB_PORTING_FEATURES`] 拼成的一串（唯一的拼法，两处共用）。
 fn web_features() -> String {
     format!("{WEB_AUDIO_FEATURES},{WEB_PORTING_FEATURES}")
@@ -94,6 +95,12 @@ const WASM_TESTS: &[(&str, &[&str], &[&str], &str)] = &[
         &[],
         &[],
         "command / vars / runner / script + bus / input（事件 VM）",
+    ),
+    (
+        "sisf-event",
+        &["--features", "js"],
+        &["js::"],
+        "js 桥账本（宿主 JS 引擎，与 native 同一份脚本判据）",
     ),
     (
         "sisf-rpgmk",

@@ -43,6 +43,10 @@ video = ["dep:sisf-media", "sisf-media/video", "image"]
 # 没有 `inspector`：T12 定案不引 egui 调试面板（`sisf-app` 那边同步删掉了空 feature）。
 # 启用：sisf-rpgmk 兼容层（T11）
 rpgmk = ["dep:sisf-rpgmk"]
+# 启用：JS 第二脚本语言运行时（T11 续，`sisf-event/js`）。native = rquickjs（会 `cc` 编
+# quickjs-ng 的 C），wasm = 浏览器自带引擎。默认**不开**：`rpgmv_shell` 用 `#[cfg(feature="js")]`
+# 门控那条腿，关着时 355/356 仍走"后端不认名字"的告警路径（DoD-4：feature 关掉 + 文档标注）。
+js = ["sisf-event/js"]
 # 启用：sisf-media/simd-jpeg → turbojpeg（native only，T4）
 simd-jpeg = ["dep:sisf-media", "sisf-media/simd-jpeg"]
 

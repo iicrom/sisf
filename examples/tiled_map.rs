@@ -2105,7 +2105,7 @@ mod tests {
     fn generated_sheet_has_premultiplied_alpha_and_empty_margins() {
         let px = build_sheet();
         assert_eq!(px.len(), (SHEET.0 * SHEET.1 * 4) as usize);
-        for chunk in px.chunks_exact(4) {
+        for chunk in px.as_chunks::<4>().0 {
             let a = chunk[3];
             assert!(a == 0 || a == 255 || a == 90, "只该三档 alpha: {a}");
             if a < 255 {

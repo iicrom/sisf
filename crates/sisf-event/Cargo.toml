@@ -13,6 +13,19 @@ serde_json.workspace = true
 ron.workspace = true
 thiserror.workspace = true
 
+# JS 第二脚本语言运行时（`js` feature）。两条腿用**不同的引擎**，靠 target 段分开：
+# native = rquickjs（quickjs-ng，`cc` 编 C），wasm = 浏览器自带引擎（js-sys + wasm-bindgen）。
+# 两个都 optional 且各自只在自己的 target 段出现 ⇒ `js` feature 在一端只激活那一端的依赖。
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rquickjs = { workspace = true, optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = { workspace = true, optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+
+[features]
+js = ["dep:rquickjs", "dep:js-sys", "dep:wasm-bindgen"]
+
 # T12：`cargo xtask wasm-test` 跑本 crate 的纯逻辑测试（bus/command/input/runner/script/vars）。
 # 只在 wasm32 target 的 dev-dependencies 里 —— 运行时依赖面与另两端完全无关。
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]

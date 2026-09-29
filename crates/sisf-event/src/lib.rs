@@ -13,6 +13,8 @@
 pub mod bus;
 pub mod command;
 pub mod input;
+#[cfg(feature = "js")]
+pub mod js;
 pub mod runner;
 pub mod script;
 pub mod vars;
