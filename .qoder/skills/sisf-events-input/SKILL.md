@@ -70,10 +70,13 @@ let st = vm.tick(&mut ctx, BUDGET);                   // 每逻辑拍一次；�
   除 0 = 0、文本槽按十进制宽容解析。
 - 脚本后端 `ScriptBackend { start/tick/command(name,args)->Option<Arc<Program>> }`：
   `command` 返回 `None` = 不认 ⇒ 登记告警继续跑（`take_warnings()`）；控制流留在虚拟机里，
-  脚本只能"再启动一段程序"。
+  脚本只能"再启动一段程序"。缺省 `NullScriptBackend` 什么都不认；`js` feature（非默认）提供
+  `sisf_event::js::JsBridge`（native=rquickjs、wasm=宿主引擎）认领 `rpgmv.script`/`rpgmv.plugin`，
+  把 JS 写请求翻成 `Command` 交 VM —— 详见 `docs/porting.md` 第 10 节。
 - 事件机不冻窗：死循环只超预算拖慢一拍（`MAX_NESTING=64`）。
 
 ## 测试入口
 
 `EngineEvent::key(..)/::action(..)` 辅助构造直接喂 `on_event`；`cargo xtask wasm-test`
-的 sisf-event 腿覆盖 command/vars/runner/bus/input（纯逻辑，无 GPU/文件系统）。
+的 sisf-event 腿覆盖 command/vars/runner/bus/input（纯逻辑，无 GPU/文件系统）；`js` 腿
+（`--features js -- js::`）覆盖 JS 桥的账本→`Command` 映射，同一份断言在 native 与 wasm 两腿各跑一遍。

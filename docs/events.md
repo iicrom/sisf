@@ -1,9 +1,9 @@
 # 事件解释器：指令表、挂起与端口（T10）
 
 [`sisf-event`](../crates/sisf-event) 的这台虚拟机把磁盘上的 RON 指令表跑成副作用。**控制流
-始终在虚拟机手里**：脚本引擎（T11 的 QuickJS / rpgmk 移植层）能做的每件事，最后都落成
-"请再启动一段程序"。这条约束换来的东西很具体 —— 存档只需要 [`VarStore`] 与页号，不需要冻结
-一颗 JS 堆。
+始终在虚拟机手里**：脚本引擎（T11 续落地的 `js` 后端 `sisf_event::js::JsBridge`，以及 rpgmk
+移植层）能做的每件事，最后都落成"请再启动一段程序"。这条约束换来的东西很具体 —— 存档只需要
+[`VarStore`] 与页号，不需要冻结一颗 JS 堆。
 
 ```text
 examples/assets/events/*.ron ──编译──► Program（扁平 IR）──┐
@@ -135,8 +135,10 @@ RON 里写 `None` 是合法的）；`else` 是 Rust 关键字，磁盘上叫 `el
 
 ## 脚本后端的口子
 
-[`ScriptBackend`] 三个方法，都可以是空实现 —— 但空在**这里**是有意的（这台机器上还没有脚本
-引擎），不是"还没写"：
+[`ScriptBackend`] 三个方法，都可以是空实现。缺省的 [`NullScriptBackend`] 空得**有意**（这台机器上
+不装脚本引擎时就是没有），不是"还没写"；而真正会解释 `Custom` 的后端在 T11 续落地成了 `js` feature
+（`sisf_event::js::JsBridge`，native=rquickjs、wasm=浏览器自带引擎），实现下面这三条就够了，
+**虚拟机一行没改** —— 这正是这个口子当初留的意义：
 
 - `start(entry)`：进入场景/地图时一次，要不要起跑由后端决定。
 - `tick(&mut EventCtx, &mut Vec<Submission>)`：每拍在指令执行**之前**。后端可以从 `ctx.bus`
@@ -145,7 +147,8 @@ RON 里写 `None` 是合法的）；`else` 是 Rust 关键字，磁盘上叫 `el
   "处理完了，但没有指令要跑"；`None` = "这个名字我不认" ⇒ 虚拟机登记告警。这两者必须分开，
   因为告警通道在事件机上（后端只拿到 `name`/`args`，它没有别的地方可说话）。
 
-QuickJS 落地时实现这三条就够了，**不必改动虚拟机一行**。装 `NullScriptBackend` 与不装后端
+JS 后端怎么把 `$gameVariables.setValue` 落成 `SetVar`、为什么写请求延后一拍、双引擎怎么保证同
+一份脚本给出同一份指令账单，都在 `docs/porting.md` 第 10 节。装 `NullScriptBackend` 与不装后端
 （`EventRunner::new()` 的形状）两条路径都留着，是为了让"我要不要脚本"这件事在**类型**上
 看得出来。
 
@@ -158,7 +161,7 @@ QuickJS 落地时实现这三条就够了，**不必改动虚拟机一行**。�
 | 指令表 / 控制流 / 变量 | 同一份 | 同一份 | 同一份 |
 | `AudioPort` 实现 | `AudioBus`（cpal） | `AudioBus`（WebAudio） | `AudioBus`（cpal/AAudio） |
 | `UiPort` 实现 | 游戏侧位图 | 同左 | 同左 |
-| 脚本后端 | 缺 `NullScriptBackend` | 同左 | 同左 |
+| 脚本后端 | 缺省 `NullScriptBackend`；开 `js` ⇒ `JsBridge`（rquickjs） | 缺省同上；开 `js` ⇒ `JsBridge`（宿主引擎） | 缺省同上；开 `js` ⇒ `JsBridge`（rquickjs） |
 
 wasm 侧一条实测注意：**HUD 上的诊断行要 ASCII**。台词是中文（那是内容，wasm 由宿主运行期从
 CDN 取一份 CJK 字库补上，`docs/text.md` 平台矩阵），但"事件机现在挂在什么上面"是 wasm 手测
@@ -237,6 +240,9 @@ NPC 链**（这一轮没有可注入的窗口焦点）。要补的清单与 wasm
 [`Prompt`]: ../crates/sisf-event/src/runner.rs
 [`Scene`]: ../crates/sisf-event/src/runner.rs
 [`ScriptBackend`]: ../crates/sisf-event/src/script.rs
+[`NullScriptBackend`]: ../crates/sisf-event/src/script.rs
+[`sisf_event::js::JsBridge`]: ../crates/sisf-event/src/js/mod.rs
+[`JsBridge`]: ../crates/sisf-event/src/js/mod.rs
 [`command.rs`]: ../crates/sisf-event/src/command.rs
 [`AnimEffect`]: ../crates/sisf-event/src/command.rs
 [`Expr`]: ../crates/sisf-event/src/command.rs
