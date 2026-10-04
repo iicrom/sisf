@@ -210,6 +210,9 @@ DataManager.loadDatabase = function () {
         this.loadDataFile('$testEvent', prefix + 'Event.json');
     }
 };
+// ↓ 这一格是**自创的底**（`objects-verbatim.py` 的 `HOME_MADE` 名单数得到）：上游 `:78-94` 那一格
+// 整段是 `XMLHttpRequest`，新边界里没有 DOM ⇒ 换成 Rust 的读取泵（`__sisf_read_text`），
+// 而"还没到"落成的状态是 `_pendingFiles` 那一格账（模块头第①条）。
 DataManager.loadDataFile = function (name, src) {
     var url = 'data/' + src;
     window[name] = null;
@@ -260,6 +263,9 @@ DataManager.isMapLoaded = function () {
     this.checkError();
     return !!$dataMap;
 };
+// ↓ 这一格**也在 `HOME_MADE` 名单里**，但性质与上一格相反：体是上游 `:130-149` 的逐字，
+// 只有最后一句 `Scene_Boot.loadSystemImages()` 包了一层 `typeof` 守卫（守卫那一格的注释在下面）。
+// 登记成底而不是删句 ⇒ M10.5 交出 `Scene_Boot` 的身体之后，那一句自己会开始跑。
 DataManager.onLoad = function (object) {
     var array;
     if (object === $dataMap) {
@@ -366,10 +372,12 @@ DataManager.createGameObjects = function() {
 "#;
 
 /// `TextManager` 整族（`rpg_managers.js:1648-1770`）：`$dataSystem.terms` 的四个取值器 +
-/// `getter` 工厂 + 64 格属性。
+/// `getter` 工厂（5 格函数）+ **86 格属性**（`currencyUnit` 一块单数访问器 + 复数
+/// `Object.defineProperties` 那一整块 **85 格**）⇒ 这一段交出 91 格，`objects-verbatim.py`
+/// 从 M10.5 的这一格起才数得到它们（`M10.md` 事实 73）。
 ///
 /// 三条要紧的形状：
-/// - `currencyUnit` 与那 64 格全是 `configurable: true` 的**取值器**（`:1676`、`:1770`）——
+/// - `currencyUnit` 与那 85 格全是 `configurable: true` 的**取值器**（`:1676`、`:1770`）——
 ///   插件（`Vitsuno_Difficulty` 等）会就地覆盖其中一格，所以不许折成 Rust 侧的只读门面。
 /// - 属性读的是**当拍的 `$dataSystem`**：库还没读出来时上游就是 TypeError（`$dataSystem` 是 `null`），
 ///   照落，不钳。
@@ -485,7 +493,7 @@ Object.defineProperties(TextManager, {
     buffAdd         : TextManager.getter('message', 'buffAdd'),
     debuffAdd       : TextManager.getter('message', 'debuffAdd'),
     buffRemove      : TextManager.getter('message', 'buffRemove'),
-    actionFailure   : TextManager.getter('message', 'actionFailure')
+    actionFailure   : TextManager.getter('message', 'actionFailure'),
 });
 "#;
 
