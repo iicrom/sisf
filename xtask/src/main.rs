@@ -108,6 +108,12 @@ const WASM_TESTS: &[(&str, &[&str], &[&str], &str)] = &[
         &[],
         "map / translate / game_vars / scene（MV 兼容层纯逻辑）",
     ),
+    (
+        "sisf-rpgmkmv",
+        &["--features", "js,web"],
+        &[],
+        "MV 兼容层：对象模型闸门四条 + 形状普查/跳板表 + managers 数据那一半 + ImageManager 的名字、缓存底与请求两半 + Game_* 的 a（状态族）、b（地图、角色、五条原型链）、c（玩法十一类与结算）与 d（`Game_Interpreter` 151 条 + `requestImages`）+ core 的三格（`Graphics` 的屏幕读数与报错面、缓存四颗 24 条、音频三圈 `AudioManager`/`SoundManager`/`WebAudio` 而 `Html5Audio` 点名不交）+ 插件注册表与装载账单",
+    ),
 ];
 /// `sisf-app` 两腿的分法说明（第一腿的 `what` 字段）。
 ///

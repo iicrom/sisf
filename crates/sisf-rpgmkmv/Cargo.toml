@@ -1,0 +1,37 @@
+[package]
+name = "sisf-rpgmkmv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "RPG Maker MV 数据解析与资产加载层（通用，不绑定具体游戏）"
+
+[dependencies]
+# VFS + WebManifest（浏览器腿的清单预取）
+sisf-asset.workspace = true
+# 引擎的地图/事件定义（MapDef, TilesetDef, RawCommand, GameVars...）
+sisf-rpgmk.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+# `js` feature（`jsrt`，兼容层的 JS 宿主）。两条腿用**不同的引擎**，靠 target 段分开：
+# native = rquickjs（quickjs-ng，`cc` 编 C），wasm = 浏览器自带引擎（js-sys + wasm-bindgen）。
+# 与 `sisf-event/js` 同一配方：两个都 optional 且各自只在自己的 target 段出现 ⇒ 一端只激活一端。
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rquickjs = { workspace = true, optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = { workspace = true, optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+
+# wasm 腿的判据要真的在 wasm32 上跑（`cargo xtask wasm-test`），runner 只认 `#[wasm_bindgen_test]`。
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test.workspace = true
+
+[features]
+default = []
+# wasm 浏览器腿的 WebManifest 支持
+web = ["sisf-asset/web"]
+# 兼容层的 JS 运行时（顶替 `rpg_*.js` 之后，插件与事件脚本跑在这一颗引擎上）。
+# 不在 default/native/web 里 ⇒ 默认构建仍然一行 C 都不编（同 `sisf-event/js` 的理由）。
+js = ["dep:rquickjs", "dep:js-sys", "dep:wasm-bindgen"]

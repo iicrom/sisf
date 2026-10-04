@@ -2467,6 +2467,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sisf-rpgmkmv"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "rquickjs",
+ "serde",
+ "serde_json",
+ "sisf-asset",
+ "sisf-rpgmk",
+ "thiserror 2.0.20",
+ "wasm-bindgen",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "sisf-sprite"
 version = "0.1.0"
 dependencies = [
