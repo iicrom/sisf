@@ -115,14 +115,20 @@ impl DeclaredShape {
     /// 之后紧跟的 `update` 读的就是构造期建的 `_targetX`）。
     /// 所以这一格交**上游的构造体**，行为件只往 `prototype` 上挂方法（挂方法可重复 ⇒ 双装安全）。
     pub fn install_line(&self) -> String {
+        // **构造体必须带名字**（`function X (` 而不是匿名 `function (`）：上游是顶层
+        // `function Game_Variables(){}`，浏览器里那颗的 `Function.prototype.name` 就是 `"Game_Variables"`，
+        // 而 `JsonEx._encode`（`rpg_core.js:9035-9038`）写的 `"@"` 读的正是在这里，
+        // `JsonEx._decode`（`:9082-9087`）再拿那个名字去 `window[名字]` 找回 prototype。
+        // 匿名 ⇒ `name === ""` ⇒ 存档往返把每一颗 `Game_*` 都读回成普通 `Object`
+        // （2026-10-05 定案"兼容上游 rpgsave"那一格的第一条判据抓到的，见 `M10.md` 事实 77）。
         match self.kind {
             ShapeKind::Class => format!(
-                "globalThis.{n} = function () {{ this.initialize.apply(this, arguments); }};\n",
+                "globalThis.{n} = function {n} () {{ this.initialize.apply(this, arguments); }};\n",
                 n = self.name
             ),
             // 静态类保住上游那句守卫：`new DataManager()` 在上游就是抛，这里不许它悄悄成功。
             ShapeKind::StaticClass => format!(
-                "globalThis.{n} = function () {{ throw new Error('This is a static class'); }};\n",
+                "globalThis.{n} = function {n} () {{ throw new Error('This is a static class'); }};\n",
                 n = self.name
             ),
         }
@@ -325,6 +331,31 @@ function AudioManager() {
             "静态类的守卫没保住"
         );
         assert!(h.eval_bool("typeof AudioManager.playBgm === 'undefined'"));
+    }
+
+    /// **每一颗形状的构造体都要带名字**（`M10.md` 事实 77，2026-10-05 存档改判之后抓到的）。
+    ///
+    /// 上游是顶层 `function Game_Variables(){}` ⇒ 浏览器里 `Game_Variables.name` 就是那颗类名，
+    /// 而 `JsonEx._encode` 写进存档的 `"@"` 那一键读的正是它（`rpg_core.js:9035-9038`），
+    /// `_decode`（`:9082-9087`）再拿那个名字去 `window[名字]` 找回 prototype。
+    /// 壳一旦写成匿名（`globalThis.X = function () {}`）：赋值给**属性**不做具名求值 ⇒
+    /// `name === ""` ⇒ `"@"` 是假值 ⇒ 每一颗 `Game_*` 读回来都退化成普通 `Object`，
+    /// **不抛、不红、下一拍才咬人**（`M10.md` 咬人第 1 条 `RegExp.$n` 同一种形状）。
+    ///
+    /// 这一条钉**源头那一行**，`core.rs` 的
+    /// `json_ex_round_trips_the_class_graph_with_its_circular_references` 钉**往返真的对得上** ——
+    /// 两头都要有，只有一头的话说不出另一头什么时候坏。
+    #[test]
+    fn the_shape_names_survive_for_json_ex() {
+        let h = Host::boot();
+        install(&h, &scan(FIXTURE_JS)).expect("形状装不上");
+        assert_eq!(
+            h.eval_string(
+                "Game_Variables.name + '|' + Game_Switches.name + '|' + AudioManager.name"
+            ),
+            "Game_Variables|Game_Switches|AudioManager",
+            "`install_line` 又交回匿名构造体了（两种 kind 都要带名字）—— 存档往返会静默丢掉每一颗类的 prototype"
+        );
     }
 
     #[test]

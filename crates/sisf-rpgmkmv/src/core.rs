@@ -61,6 +61,45 @@ pub const GRAPHICS_JS: &str = include_str!("js/core_graphics.js");
 /// CacheEntry,CacheMap,ImageCache,RequestQueue --ctor` 切出，`objects-verbatim.py` 逐字对表。
 pub const CACHE_JS: &str = include_str!("js/core_cache.js");
 
+/// 自创的底：**`PIXI` 那一族的底**（M10.5 全 shim 的第一格，2026-10-05）。
+///
+/// 它**不是上游文本**，所以逐字尺子不比它的内容，改由 `objects-verbatim.py` 新加的那一段
+/// （`SHIM_BASE` 双向白名单）数它交出/自创了哪几颗。存在的理由量在文件头：`rpg_core.js` 十四颗
+/// 渲染类里 **13 颗**的链基类写的是 `PIXI.…`（尺子 `tools/probes/pixi-face.py --chains`），
+/// 交不出这一层，那十三颗一颗都装不上。
+///
+/// 这一格只有两颗（`PIXI.Point`/`PIXI.Rectangle`）—— 就是今天真流要的那两条链的脚下。
+/// 剩下的（`PIXI.Container`/`PIXI.Sprite`/`PIXI.extras.PictureTilingSprite`/
+/// `PIXI.filters.ColorMatrixFilter`）随各自的渲染类一起加，**一格的理由写在一格头上**：
+/// 这一层的成员只由**量出来的**引用增加（`pixi-face.py` 那一族），不照 PIXI 的常识补。
+pub const PIXI_SHIM_JS: &str = include_str!("js/shim_pixi.js");
+
+/// `rpg_core.js:621-674` 的 `Point`/`Rectangle` 两颗：**2 条链 + 2 条 `constructor` 补句 +
+/// 2 条 `prototype.initialize` + `Rectangle.emptyRectangle` 那一格数据形状**。
+///
+/// 文本由 `../sisf_pray/tools/probes/objects-slice.py --file rpg_core.js
+/// --classes Point,Rectangle --allow-base PIXI.Point,PIXI.Rectangle` 切出，
+/// `objects-verbatim.py` 逐字对表。`emptyRectangle` 的右值不是函数 ⇒ 那一把尺子数不到，
+/// 由下面的判据数（同 `_imageCache` 那条"数据形状由判据数"的纪律）。
+///
+/// 构造体**沿用 [`crate::shapes`] 那颗壳**（体就是 `this.initialize.apply(this, arguments);`，
+/// 切片器报"沿用壳的 2 颗"），所以 `--ctor` 不开。但那条链把 `Point.prototype` **整颗换掉**成
+/// `Object.create(PIXI.Point.prototype)` —— 壳原来挂在那颗 prototype 上的东西就此没有了，
+/// 换成上游那一颗 `initialize`，这正是我们要的：`new Point(3,4)` 之后 `x`/`y` 落得下来。
+pub const POINT_AND_RECTANGLE_JS: &str = include_str!("js/core_point_and_rectangle.js");
+
+/// 装上 `Point`/`Rectangle`，并把它们脚下那层 `PIXI` 的底一起装好。
+///
+/// **顺序在这一格里是内部前提，不是调用方的功课**（同
+/// `managers_install_does_not_depend_on_the_caller_installing_core_first` 那条纪律）：
+/// 上游文本第一句就读 `PIXI.Point.prototype`，先装它就是当场抛。
+pub fn install_geometry(host: &Host) -> Result<(), String> {
+    host.eval(PIXI_SHIM_JS)
+        .map_err(|e| format!("`PIXI` 那一层底装不上：{e}"))?;
+    host.eval(POINT_AND_RECTANGLE_JS)
+        .map_err(|e| format!("`Point`/`Rectangle` 那两颗装不上：{e}"))
+}
+
 /// 装上缓存四颗。**幂等**：四颗都是"同一颗全局上重新 define"，第二次装不抛
 /// （`reinstalling_the_cache_classes_keeps_the_entries` 钉这一格：重装之后已存的条目还在）。
 ///
@@ -73,8 +112,30 @@ pub fn install_cache(host: &Host) -> Result<(), String> {
         .map_err(|e| format!("`ImageCache` 那一圈装不上：{e}"))
 }
 
-/// 装上 core 的这一格：缓存四颗 + `Graphics` 的屏幕读数与报错面。
+/// `rpg_core.js:8913-9146` 的 **`JsonEx`**：**11 条函数型静态成员 + 2 格静态常量**
+/// （`maxDepth = 100` / `_id = 1`）。构造体**不交** —— `new JsonEx()` 那句 `throw` 是
+/// [`crate::shapes`] 那颗静态类壳的活（M10.3 事实 2⑴ 改判之后壳就交这一句）。
+///
+/// 文本由 `objects-slice.py --file rpg_core.js --classes JsonEx` 切出，`objects-verbatim.py`
+/// 逐字对表；那 2 格常量右值不是函数 ⇒ 尺子数不到，由下面的判据数（同 `_imageCache` 一条腿）。
+///
+/// **为什么这一格排在渲染面之前**：2026-10-05 把待定项 1 改判成"兼容上游 `rpgsave`"
+/// （见本文「三条待定项」），而 `DataManager.saveGame` 那句 `JsonEx.encode(game)` 与
+/// `JsonEx.decode` 的往返**就是**那一份存档的编解码器 —— 它比 `Bitmap` 便宜（11 条里 0 处硬底），
+/// 而它不通的话，后面那一族（`LZString` / `StorageManager` / `Scene_File`）一块都动不了。
+pub const JSON_EX_JS: &str = include_str!("js/core_jsonex.js");
+
+/// 装上 `JsonEx`（要 [`crate::shapes`] 先把 `JsonEx` 那颗静态类壳挂上）。
+pub fn install_json_ex(host: &Host) -> Result<(), String> {
+    host.eval(JSON_EX_JS)
+        .map_err(|e| format!("`JsonEx` 那 11 格装不上：{e}"))
+}
+
+/// 装上 core 的这一格：`Point`/`Rectangle`（踩着 `PIXI` 那层底）+ `JsonEx` + 缓存四颗 +
+/// `Graphics` 的屏幕读数与报错面 + 音频三圈。
 pub fn install(host: &Host) -> Result<(), String> {
+    install_geometry(host)?;
+    install_json_ex(host)?;
     install_cache(host)?;
     host.eval(GRAPHICS_JS)
         .map_err(|e| format!("`Graphics` 的屏幕那一格装不上：{e}"))?;
@@ -163,7 +224,9 @@ pub fn set_screen_size(host: &Host, width: i32, height: i32) -> Result<(), Strin
 mod tests {
     //! fixture 判据：两条腿各跑一遍（同一份文本、同一组断言）。真数据那一格（虚拟屏的数从
     //! `YEP_CoreEngine` 的参数落到 `Game_Map.screenTileX`）住在 `pray/src/compat.rs`。
-    use super::{install, install_audio, install_cache, set_screen_size};
+    use super::{
+        install, install_audio, install_cache, install_geometry, install_json_ex, set_screen_size,
+    };
     use crate::jsrt::Host;
     use crate::shapes::{DeclaredShape, ShapeKind, install as install_shapes};
 
@@ -198,7 +261,8 @@ mod tests {
         ("ResourceHandler", ShapeKind::StaticClass),
     ];
 
-    /// 只装 `Graphics` 一颗静态形状 + core 这一格 ⇒ 断言的是这一格自己，不借别族的东风。
+    /// 只装 core 这一格要的那几颗形状（`Graphics` + `Point`/`Rectangle` + 缓存四颗 + 音频那一族）
+    /// ⇒ 断言的是这一格自己，不借别族的东风。
     ///
     /// **但音频那一圈之前要先摆上 `ResourceHandler.createLoader` 那一半**，这一手不是为了
     /// 凑齐依赖，是为了让 `_standAlone` 这一格**与 realm 的历史无关**：
@@ -211,7 +275,11 @@ mod tests {
     /// 提升拿到 `ResourceHandler` ⇒ 真机上 `_standAlone` 恒 false 且 `createLoader` 在场），
     /// `managers.rs` 的 `managers_install_installs_the_audio_round_itself` 钉另一头。
     fn booted() -> Host {
-        let mut names: Vec<(&str, ShapeKind)> = vec![("Graphics", ShapeKind::StaticClass)];
+        let mut names: Vec<(&str, ShapeKind)> = vec![
+            ("Graphics", ShapeKind::StaticClass),
+            ("JsonEx", ShapeKind::StaticClass),
+        ];
+        names.extend(GEOMETRY_SHELLS.iter().cloned());
         names.extend(CACHE_SHELLS.iter().map(|n| (*n, ShapeKind::Class)));
         names.extend(AUDIO_SHELLS.iter().cloned());
         let host = shell(&names);
@@ -219,6 +287,134 @@ mod tests {
             .expect("ResourceHandler 的 loader 那一半装不上");
         install(&host).expect("core 的这一格装不上");
         host
+    }
+
+    /// `Point`/`Rectangle` 两颗的形状（`shapes::scan` 从 `rpg_core.js` 扫出来是 `Class`，
+    /// 构造体沿用壳 ⇒ `--ctor` 不开，见 [`super::POINT_AND_RECTANGLE_JS`] 那段注释）。
+    const GEOMETRY_SHELLS: &[(&str, ShapeKind)] =
+        &[("Point", ShapeKind::Class), ("Rectangle", ShapeKind::Class)];
+
+    /// 只装那两颗（不碰缓存/`Graphics`/音频）—— 判据各自最小化，同 `cache_booted` 的手法。
+    fn geometry_booted() -> Host {
+        let names: Vec<(&str, ShapeKind)> = GEOMETRY_SHELLS.to_vec();
+        let host = shell(&names);
+        install_geometry(&host).expect("`Point`/`Rectangle` 那两颗装不上");
+        host
+    }
+
+    /// **那两条链真的落在 `PIXI` 那层底上**：`new Point(3,4)` 之后 `x`/`y` 落得下来、
+    /// `instanceof PIXI.Point` 成立、`constructor` 补句指回自己；`Rectangle` 四格同理，
+    /// 再加上 `Rectangle.emptyRectangle` 那一格**数据形状**（逐字尺子只认 `= function`，
+    /// 数不到它 ⇒ 这一格的账由判据数，同 `_imageCache` 那条纪律）。
+    ///
+    /// 反面对照也一起钉：**只有壳没有交付文本时 `new Point(3,4)` 当场抛**
+    /// （`M10.md` 咬人第 2 条⑴ 改判之后占位构造器就是这一格形状 —— 它不悄悄交出一个没字段的对象，
+    /// 而是敲在 `this.initialize.apply` 上）。钉的是"**抛不抛**"这件状态，不是句子：
+    /// 两条腿的异常文本不一样（QuickJS 只说 "not a function"，node 带上属性名）。
+    #[test]
+    fn the_point_and_rectangle_chains_land_on_the_shim_base() {
+        let shell_only = {
+            let names: Vec<(&str, ShapeKind)> = GEOMETRY_SHELLS.to_vec();
+            let host = shell(&names);
+            host.try_eval_string("String(new Point(3, 4).x)").is_err()
+        };
+        assert!(
+            shell_only,
+            "只有 `shapes` 那颗壳时 `new Point(3,4)` 必须**抛**（壳的体是 \
+             `this.initialize.apply(this, arguments)`，而交付文本之前 prototype 上没有 `initialize`）—— \
+             这是这一格的反面对照；哪天它不抛了，就是壳自己开始写字段，那条腿要重看"
+        );
+
+        let host = geometry_booted();
+        let js = r#"
+var out = [];
+var p = new Point(3, 4);
+out.push(String(p.x) + ',' + p.y);
+out.push(String(p instanceof PIXI.Point));
+out.push(String(Point.prototype.constructor === Point));
+var d = new Point();
+out.push(String(d.x) + ',' + d.y);
+var r = new Rectangle(1, 2, 3, 4);
+out.push(String(r.x) + ',' + r.y + ',' + r.width + ',' + r.height);
+out.push(String(r instanceof PIXI.Rectangle));
+var e = Rectangle.emptyRectangle;
+out.push(String(e instanceof Rectangle));
+out.push(String(e.x) + ',' + e.y + ',' + e.width + ',' + e.height);
+out.join('|')
+"#;
+        assert_eq!(
+            num(&host, js),
+            "3,4|true|true|0,0|1,2,3,4|true|true|0,0,0,0",
+            "两条链落不进那层底（`x`/`y`/`width`/`height` 读不到）、或 `emptyRectangle` 那一格没建出来"
+        );
+    }
+
+    /// **手交的每一段都要能装第二次**（`M10.md`「这一族的规矩」第 4 条）：wasm 腿一整个进程
+    /// 共享一个 realm，`install_geometry` 会被后来的判据再装一遍。这一格两条腿都数得到，
+    /// 而只有 wasm 腿能真正咬到它（native 每条判据一个新 realm）。
+    #[test]
+    fn the_pixi_shim_base_installs_twice_in_one_realm() {
+        let names: Vec<(&str, ShapeKind)> = GEOMETRY_SHELLS.to_vec();
+        let host = shell(&names);
+        install_geometry(&host).expect("第一次装不上");
+        install_geometry(&host).expect("第二次装不上（共享 realm 里重assign 不许抛）");
+        assert_eq!(
+            num(&host, "String(new Point(5, 6).x) + ',' + new Point(5, 6).y"),
+            "5,6",
+            "重装之后那两颗还要能用"
+        );
+    }
+
+    /// `JsonEx` 的**往返**：类名、字段、循环引用三样都要回来，而那份 JSON 里的元数据键
+    /// 必须就是上游那四种拼写（`@c` 每条一个 id / `@` 类名 / `@r` 指回同一个对象 / `@a` 数组包装，
+    /// `rpg_core.js:9026-9066` 的 `_encode` 与 `:9077-9113` 的 `_decode`）。
+    ///
+    /// 这一格是 2026-10-05 改判"存档兼容上游 `rpgsave`"的第一块：`DataManager.saveGame` 的
+    /// `JsonEx.encode(game)` / `decode` 就是那一份文件的编解码器，**它不通后面那一族一块都动不了**。
+    /// 两条腿都要绿 ⇒ 类用 `globalThis.X = function…` 而不是 `function X(){}` 声明
+    /// （`js_sys::eval` 不把声明漏成全局，`M10.0` 事实 2）。
+    #[test]
+    fn json_ex_round_trips_the_class_graph_with_its_circular_references() {
+        let names: Vec<(&str, ShapeKind)> = vec![
+            ("Graphics", ShapeKind::StaticClass),
+            ("JsonEx", ShapeKind::StaticClass),
+            // 样品就用**这一族的真实形状**：`shapes` 挂的那颗壳 + JS 侧往 `prototype` 上挂的
+            // `initialize`。这样这一条判据同时钉住"壳的名字在场"（`JsonEx` 找回 prototype 靠它）。
+            ("Game_Sample", ShapeKind::Class),
+        ];
+        let host = shell(&names);
+        // **跨族的一条真实前提**（不是测试凑数）：`JsonEx._decode` 找回 prototype 走的是
+        // `window[value['@']]`（`rpg_core.js:9083`），而 native 腿的 `window` 来自平台件那一句
+        // `globalThis.window = globalThis`（浏览器里两者本来就是同一颗）。少了它，
+        // 每一次读档都在这一行抛 "window is not defined" —— 这一格就是这么量出来的。
+        host.eval(crate::platform::HOST_GLOBALS_JS)
+            .expect("平台件的全局那一格摆不下");
+        install_json_ex(&host).expect("`JsonEx` 装不上");
+        let js = r#"
+Game_Sample.prototype.initialize = function (n) { this.value = n; };
+var s = new Game_Sample(7);
+s.other = new Game_Sample(9);
+s.back = s;
+var text = JsonEx.stringify(s);
+var t = JsonEx.parse(text);
+var out = [];
+out.push(String(Game_Sample.name));
+out.push(t.constructor.name);
+out.push(String(t.value) + ',' + t.other.value);
+out.push(String(t.back === t));
+out.push(String(text.indexOf('"@":') >= 0) + ',' + String(text.indexOf('"@r":') >= 0));
+out.push(String(text.indexOf('"@c":') >= 0));
+out.push(String(JsonEx.maxDepth) + ',' + (typeof JsonEx._id));
+out.join('|')
+"#;
+        assert_eq!(
+            num(&host, js),
+            "Game_Sample|Game_Sample|7,9|true|true,true|true|100,number",
+            "往返丢了类名 / 循环引用没有指回同一个对象 / 元数据键的拼写不是上游那四种 —— \
+             每一种都是 `rpgsave` 读不回来的表征。头两格（`Game_Sample.name` 与 \
+             `t.constructor.name`）钉的是 [`crate::shapes::DeclaredShape::install_line`] 那一格\
+             换掉匿名构造体的那一手：`@` 那一键读的就是它。"
+        );
     }
 
     /// 只装缓存四颗（不碰 `Graphics`）—— 缓存那几条判据各自最小化。

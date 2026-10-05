@@ -807,6 +807,23 @@ ImageManager.reserveNormalBitmap = function(path, hue, reservationId){
 /// `this.createBuffer` 当成 `AudioContext.prototype.createBuffer` 的假阳性，`M10.md` 事实 67）。
 pub const MANAGERS_AUDIO_JS: &str = include_str!("js/managers_audio.js");
 
+/// `js/libs/lz-string.js` **整颗照抄**（上游实测 6,702 字节 / **1 行**：一颗
+/// `var LZString={_keyStr:…, compressToBase64:…, decompressFromBase64:…, compress:…, decompress:…}`
+/// 后面跟着 UMD 那句 `module.exports` 的守卫）+ 一行挂全局。
+///
+/// 交它的理由是 2026-10-05 的**改判**（`../sisf_pray/M10.md`「三条待定项」第 1 条 = 存档兼容上游
+/// `rpgsave`）：上游那一份 `.rpgsave` 的编解码器就是两颗 —— `JsonEx.stringify`/`parse`
+/// （`rpg_managers.js:371`/`:388`）与 `LZString.compressToBase64`/`decompressFromBase64`
+/// （`:674`/`:691`，另有 `:701`、`:731`、`:737` 三处同形调用点），少一颗都读不了真档。
+///
+/// 尾行那一格不是改良，是**装载形状逼出来的**：`js_sys::eval` 不把 `var` 声明漏成全局
+/// （[`crate::jsrt`] 模块头第 2 条，与"构造体要写成 `X = function`"同一条腿），不附它，
+/// 下一段 eval 里的 `StorageManager` 就喊不到 `LZString`。逐字由
+/// `../sisf_pray/tools/probes/objects-verbatim.py` 的**第五段**（`LIB_WHOLE`）比
+/// "整串 + 登记过的那行尾行"；那四种按顶层声明切块的口径对这一族没有意义 —— 它没有 MV 的形状，
+/// 是一整颗数据形状，所以它既不进格数、也不进构造体那一档（`M10.md` 事实 63 那条纪律的另一面）。
+pub const LZ_STRING_JS: &str = include_str!("js/lib_lz_string.js");
+
 /// 装上 managers 的数据那一半。`vfs` 是宿主的那一份只读来源（native 磁盘 / 浏览器清单）。
 ///
 /// 顺序要求在 [`crate::platform::install`] **之后**（`DataManager.isBattleTest` 读 `Utils.isOptionValid`，
@@ -824,7 +841,16 @@ pub fn install(host: &Host, vfs: Rc<Vfs>) -> Result<(), String> {
     let source = Rc::clone(&vfs);
     host.bind_str(READ_TEXT_GLOBAL, move |path| read_text(&source, &path))?;
     crate::core::install_cache(host)?;
+    // **`JsonEx` 也在这一档自己装**，不等调用方先跑 [`crate::core::install`]：本族要它的是
+    // `DataManager.saveGame`/`loadGame` 那两句（`rpg_managers.js:371`/`:388`），
+    // 与缓存四颗同一条纪律（`managers_install_does_not_depend_on_the_caller_installing_core_first`）。
+    // 2026-10-05 的真数据判据第一次就是这么红的：`typeof JsonEx.parse` 是 `undefined`，
+    // 而 `LZString.decompressFromBase64` 明明在场 —— 红在"谁装 core 的那一格"，不是红在算法。
+    crate::core::install_json_ex(host)?;
     for text in [
+        // 库那一族排在最前：它是**一颗 `var`**，后面每一段都可能喊它（今天喊它的是
+        // `StorageManager`/`DataManager` 的存档那一句，还没交）。
+        LZ_STRING_JS,
         DECRYPTER_JS,
         RESOURCE_HANDLER_LOADER_JS,
         DATA_MANAGER_JS,
@@ -873,6 +899,11 @@ mod tests {
         "AudioManager",
         "SoundManager",
         "Html5Audio",
+        // 存档那一族（2026-10-05 改判"兼容上游 rpgsave"之后）：`managers::install` 现在自己装
+        // `JsonEx` 那 11 格（`DataManager.saveGame`/`loadGame` 两句要它，`rpg_managers.js:371`/`:388`），
+        // 而这一族的 fixture 只 shapes 自己点名的那些 ⇒ **同一条咬法再来一次**：
+        // 不点名就是 `JsonEx is not defined`，而那 29 条判据会一起红。
+        "JsonEx",
     ];
 
     /// M10.4 第二格起，`managers::install` 自己会装 core 的缓存四颗 ⇒ 这四颗的**形状**要在场
@@ -1598,6 +1629,49 @@ out.join('|')
             "false|function|function|audio/|0.5|53|27",
             "53 + 27 是与尺子对表的读数；`_standAlone` 必须是 false（装载次序的归属写进代码， \
              见 `M10.md` 的 M10.4 第三格）"
+        );
+    }
+
+    /// 上游那颗 `LZString` **整颗照抄**之后必须做到的三件事（2026-10-05 的存档改判第一格）：
+    /// ⑴ **挂得上全局** —— 上游是 `var LZString=…`，而 `js_sys::eval` 不把 `var` 漏成全局
+    ///    （`jsrt` 模块头第 2 条），所以文本末尾那一行是本族的**唯一自创面**；
+    /// ⑵ **那颗库的 UMD 尾巴不许改变这一格的结果**：`if (typeof module !== "undefined" …)
+    ///    module.exports = LZString` 在两条腿上的答案本来就**不一样** —— native（QuickJS）里没有
+    ///    `module`，而 wasm 腿跑在 node 的 CommonJS 里 ⇒ `typeof module` 是 `object`，那句守卫
+    ///    在那条腿上**真的会执行**（挂到测试壳的 exports 上，与我们下一行的 `globalThis` 各管各的）。
+    ///    所以这一格钉的是"**attach 成功 + 方法在场**"这件落点，不是钉环境
+    ///    （`M10.md`「这一族的规矩」：两条腿的差别要钉状态，不许钉句子/读数 —— 第一版就是钉了
+    ///    `typeof module` 而只在 native 绿、wasm 红，`M10.md` 事实 78 的第三条）；
+    /// ⑶ base64 那一条腿**自己往返得回来**：ASCII + 中文 + 标点、空串、以及一条长重复串
+    ///    （长到让 LZW 字典长大，`compress` 里的 `a`/`l` 那两级台阶只有这种样本才走得到）。
+    ///
+    /// **真档那一条腿不在这里**：解磁盘上的 `save/file4.rpgsave` 并与移植侧 Rust 的 `mv_save`
+    /// 逐字节对表，住在 `sisf_pray/src/compat.rs`（引擎侧不许知道某一款游戏在哪）。
+    #[test]
+    fn the_upstream_lz_string_attaches_to_global_and_round_trips() {
+        let host = booted_default();
+        let js = r#"
+var out = [];
+out.push(typeof LZString);
+out.push(typeof LZString.compressToBase64);
+var s = '祈愿诗篇 v1.02 — save 4 ~!@#$%^&*()_+{}[]|:;<>,.?';
+out.push(String(LZString.decompressFromBase64(LZString.compressToBase64(s)) === s));
+out.push(String(LZString.decompressFromBase64(LZString.compressToBase64('')) === ''));
+out.push(String(LZString.decompressFromBase64(LZString.compressToBase64('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')) === 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'));
+out.push(String(LZString.compressToBase64(null)));
+out.join('|')
+"#;
+        assert_eq!(
+            host.eval_string(js),
+            "object|function|true|true|true|",
+            "前两格是「挂得上全局」那一行的落点（`typeof module` 故意不钉：native 没有而 node 有）；\
+             最后那格是上游 `compressToBase64(null)` 的原文形状（`if(e==null)return\"\"`）"
+        );
+        // **装第二次不许抛**（共享 realm 那条纪律）：一颗 `var` 加一行普通赋值，天然幂等。
+        host.eval(LZ_STRING_JS)
+            .expect("`LZString` 装第二次抛了（共享 realm）");
+        assert!(
+            host.eval_bool("LZString.decompressFromBase64(LZString.compressToBase64('x')) === 'x'")
         );
     }
 
