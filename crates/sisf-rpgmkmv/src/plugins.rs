@@ -32,6 +32,9 @@ pub struct Plugin {
 pub struct Registry {
     pub entries: Vec<Plugin>,
     /// 整个数组的原文，`install` 时逐字交给 JS。
+    /// 唯一的读者 `install` 在 `js` 那道闸里 ⇒ **不带 `js` 的组合里它恒"没被读"**，
+    /// 而那是这条腿的正常形状（数据层不装宿主），不是死代码 —— 记账而不是删字段。
+    #[cfg_attr(not(feature = "js"), allow(dead_code))]
     array_text: String,
 }
 

@@ -554,11 +554,157 @@ ImageManager.isZeroParallax = function(filename) {
 /// 这一格的体只读 `this._exiting` 与 `this._nextScene` 两格，两者在"还没有场景栈"的宿主里都是
 /// `undefined` ⇒ 读出 `false`（= 不在换场景），与上游"停在同一场景里跑事件"的那一档同答案；
 /// M10.5 交 `goto`/`push`/`prepareNextScene` 之后，这两格由场景机制自己写，这一格一个字都不改。
+/// `ImageManager` 的 **`loadXXX` 那一族**（`rpg_managers.js:803-898` 的十格逐字）。
+///
+/// **为什么这一族随 M10.5 的场景第二段交**（2026-10-06 先量边界再动代码）：那十颗
+/// `Sprite_*`/`Spriteset_*` 的体里跨层只喊 **19 处 / 四颗接收者**（口径 = **切出来的那一份**
+/// `src/js/sprites_flow.js`，`grep -o "ImageManager\.[A-Za-z_]*" … | sort | uniq -c` 三条一起数；
+/// ⚠ 不是 `core-touch.py --deps --file rpg_sprites.js` 那一把 —— 它量的是**整份上游文件**，
+/// 读数是 core 3 名 / 58 处 + managers 5 名 / 30 处，两个口径别互换），其中 `ImageManager` 占 7 名
+/// —— `loadAnimation`(2)、`loadCharacter`(1)、
+/// `loadParallax`(2)、`loadPicture`(1)、`loadSystem`(2)、`loadTileset`(2) 加名字那一半已交的
+/// `isBigCharacter`。少任何一名，落法都不是"这一格不画"，而是上一格刚记过的那一条（事实 130）：
+/// **TypeError 抛穿调用它的那一句**，而调用它的是 `Spriteset_Map.loadTileset`/`updateParallax`
+/// 这种**建图那一刻**就走到的格子。另两名 `loadTitle1`/`loadTitle2` 的理由是场景第一段交出的
+/// `Scene_Title.createBackground`（那 19 格缺席名单里今天销掉两格）。
+///
+/// **底下的腿今天全通**，所以这一族**零新底**（`SHIM_BASE` 仍 64、`HOME_MADE` 仍 8）：
+/// `loadBitmap` → `loadNormalBitmap` → `Bitmap.load`（随 `Bitmap` 那一格逐字交出）→
+/// `_requestImage`（宿主底：VFS 字节 + [`crate::raster`] 解码，**当拍就 ready**）→
+/// `addLoadListener`/`rotateHue`（滤镜那一半）/`decode`/`isReady` 全是已交付的上游文本。
+///
+/// ⚠ **`loadBitmap` 里那张 `dict` 是这一款工程自己打上去的补丁**（`"Com_物品" → "Com_Item"`，
+/// 在官方 MV 的那一份里没有这一格）：本族的"上游"指的是**这款工程的 `js/`**，不是官方发行版，
+/// 所以逐字尺子比的就是带这张表的文本。**照官方 MV 重写这一格才是跑字**（图名会拼成磁盘上
+/// 没有的那一个）。这是"上游有几个版本"这一格在本族第一次落到文本级。
+pub const IMAGE_MANAGER_LOAD_JS: &str = r##"
+ImageManager.loadAnimation = function(filename, hue) {
+    return this.loadBitmap('img/animations/', filename, hue, true);
+};
+
+ImageManager.loadCharacter = function(filename, hue) {
+    return this.loadBitmap('img/characters/', filename, hue, false);
+};
+
+// ↑ 上游 `:819-821`；↓ 这一格与 `reserveFace` 是 **windows 那一族（`rpg_windows.js` 的 12 颗）带来的**
+// （`rpg_managers.js:823-825` / `:943-945` 逐字）。同一条腿还是事实 130 那一课的第三次兑现，
+// 只不过这一次仍是**开工前量的**：切出来的窗文本里 `Window_Base.drawFace` 喊 `loadFace`、
+// `Window_Base.reserveFaceImages` 与 `Window_Message.loadMessageFace` 喊 `reserveFace` ——
+// 少任何一名，表征都不是"头像不画"，而是 **TypeError 抛穿建窗那一句**。
+ImageManager.loadFace = function(filename, hue) {
+    return this.loadBitmap('img/faces/', filename, hue, true);
+};
+
+ImageManager.loadParallax = function(filename, hue) {
+    return this.loadBitmap('img/parallaxes/', filename, hue, true);
+};
+
+ImageManager.loadPicture = function(filename, hue) {
+    return this.loadBitmap('img/pictures/', filename, hue, true);
+};
+
+ImageManager.loadSystem = function(filename, hue) {
+    return this.loadBitmap('img/system/', filename, hue, false);
+};
+
+ImageManager.loadTileset = function(filename, hue) {
+    return this.loadBitmap('img/tilesets/', filename, hue, false);
+};
+
+ImageManager.loadTitle1 = function(filename, hue) {
+    return this.loadBitmap('img/titles1/', filename, hue, true);
+};
+
+ImageManager.loadTitle2 = function(filename, hue) {
+    return this.loadBitmap('img/titles2/', filename, hue, true);
+};
+
+ImageManager.loadBitmap = function(folder, filename, hue, smooth) {
+    if (filename) {
+        var dict = {
+            "Com_物品": "Com_Item"
+          };
+        var path = folder + encodeURIComponent(dict[filename] || filename) + '.png';
+        var bitmap = this.loadNormalBitmap(path, hue || 0);
+        bitmap.smooth = smooth;
+        return bitmap;
+    } else {
+        return this.loadEmptyBitmap();
+    }
+};
+
+ImageManager.loadNormalBitmap = function(path, hue) {
+    var key = this._generateCacheKey(path, hue);
+    var bitmap = this._imageCache.get(key);
+    if (!bitmap) {
+        bitmap = Bitmap.load(decodeURIComponent(path));
+        bitmap.addLoadListener(function() {
+            bitmap.rotateHue(hue);
+        });
+        this._imageCache.add(key, bitmap);
+    }else if(!bitmap.isReady()){
+        bitmap.decode();
+    }
+
+    return bitmap;
+};
+
+"##;
+
 pub const SCENE_MANAGER_SWITCH_JS: &str = r#"
 SceneManager.isSceneChanging = function() {
     return this._exiting || !!this._nextScene;
 };
 "#;
+
+/// `SceneManager` 的**主循环那一族**（M10.5 真绘制第四小格 + 第五小格第一小格，
+/// `rpg_managers.js:1787-2131` 的 **30 格逐字**：14 格数据形状 + 16 格函数型静态成员）。
+///
+/// 文本由 `../sisf_pray/tools/probes/objects-slice.py --file rpg_managers.js --classes SceneManager
+/// --skip <那 31 格>` 切出（命令原文抄 `M10.md`「真绘制第四小格」那一节），逐字由
+/// `objects-verbatim.py` 的 managers 那一档扫 `src/js/managers_*.js` 数到。
+///
+/// **交的是哪一类判断**：`changeScene`（`:1998-2017`）与 `updateScene`（`:2019-2030`）那两句里
+/// 藏着移植侧必须照抄的三格 —— ⑴ 换场景要等 `!isCurrentSceneBusy()`（`_scene.isBusy()` 就是
+/// `_fadeDuration > 0`，这就是"淡出的 24 拍挡住的是进图"的上游出处，`AGENTS.md` 咬人第 34 条⑵）；
+/// ⑵ `start()` 只在 `isReady()` 为真的那一拍跑一次（`_sceneStarted` 那格旗）；⑶ `_previousClass`
+/// 是在 `terminate()` **之后**才记的，所以 `Scene_Map.needsFadeIn()` 读的是"上一颗是谁"。
+/// 手写等价物会丢掉这三格里任意一格，所以按 `scenes.rs` 模块头同一条纪律：**交上游那份文本**。
+///
+/// **不交的那 31 格分成四族**，每一族都有出处（尺子 `scene-loop-face.py` ④ 逐格点名）：
+/// ⑴ **墙钟**（`update`/`updateMain`/`requestUpdate`/`tickStart`/`tickEnd`/
+/// `_currentTime`/`_getTimeInMsWithoutMobileSafari`/`terminate`/`resume`）—— 上游那条腿是
+/// `requestAnimationFrame` + `_accumulator` 追帧，而移植侧的拍子归**引擎的定步长**
+/// （`Options{tick_hz: 60}`）。不搬那条腿，每拍跑它 while 体里的那四句
+/// （`updateManagers` + `updateInputData` + `changeScene` + `updateScene`），落在
+/// `../sisf_pray/src/compat_scene.rs::pump`。**`updateInputData` 是上一格收完之后从这一族里拿出来
+/// 逐字交的**：它的体只有 `Input.update(); TouchInput.update();` 两句，而那两颗**早就在场**
+/// （`platform.rs` 的 `INPUT_JS`/`TOUCH_INPUT_JS`，连"输入的门" `Input._onKeyDown`/`_onKeyUp`/
+/// `_onLostFocus` 都是上游形状）⇒ 这一格里既没有墙钟也没有 DOM，归错族就会让"输入那一拍"变成
+/// 移植侧手写的一格；上游在 while 体里它排**第一句** ⇒ 泵的次序照它，不是照顺手；
+/// ⑵ **开机 + DOM/Electron**（`run`/`initialize`/
+/// `initGraphics`/`initAudio`/`initInput`/`initNwjs`/`checkWebGL`/`checkFileAccess`/
+/// `setupErrorHandlers`/`onError`/`onKeyDown`/`catchException`/`preferableRendererType`/
+/// `shouldUseCanvasRenderer`/`resume`）—— 归宿主（`checkWebGL` 读 `Graphics.hasWebGL()` 那一族、
+/// `initNwjs` 读 `require('nw.gui')`、`resume`/`terminate` 读 `requestAnimationFrame`/`window.close`）；
+/// **`stop` 不在这一族**：上游那一格的体是 `this._stopped = true`（纯旗标，`_stopped` 也在本次
+/// 交出的那 14 格里）⇒ 逐字交，而它的读者（`requestUpdate`）属于墙钟那一族 ⇒ 今天零读者，
+/// 判据按"旗标落得下去"钉，不按"泵停下来"钉；
+/// ⑶ **渲染那一格** `renderScene`（体是 `Graphics.render(this._scene)`）⇒ 移植侧由
+/// `../sisf_pray/src/compat_scene.rs` 的**走树 + `CompatPaint`** 顶掉（上一格交的那条腿）；
+/// ⑷ **`Graphics` 的载入图与渲染器截图**（`onSceneCreate`/`onSceneStart`/`onSceneLoading`/`snap`/
+/// `snapForBackground`）⇒ 见 [`MANAGERS_SCENE_HOST_JS`] 那一份宿主那一侧的三格。
+///
+/// **`_screenWidth`/`_boxWidth` 交的是上游的 `816`/`624`，不改数**：那四格只被**没交的**
+/// `initGraphics`/`resize` 读，而真虚拟屏是 1104×736（`AGENTS.md` 上游事实卡：816×624 是 Electron
+/// 的盒尺寸，`YEP_CoreEngine` 覆盖的是 `Graphics._width/_height` 那一族）。改初值就是造第二个真相。
+pub const MANAGERS_SCENE_LOOP_JS: &str = include_str!("js/managers_scene_loop.js");
+
+/// [`MANAGERS_SCENE_LOOP_JS`] 的**宿主那一侧**：三格上游文本的体落在移植侧没有的那一层
+/// （`Graphics._upperCanvas` 的载入图、`Bitmap.snap` 的渲染器截图），而它们的**产物在真流里
+/// 零读者** —— 逐格理由与"为什么不造没人读的底"写在该文件头上，格数由
+/// `objects-verbatim.py` 的 `HOME_MADE` 名单双向数着。
+pub const MANAGERS_SCENE_HOST_JS: &str = include_str!("js/managers_scene_host.js");
 
 /// `ImageManager` 的**缓存底**（`rpg_managers.js:793-797,799-801,900-902,1001-1003,1090-1096`
 /// 逐字，九格：四格静态底 + `_generateCacheKey` + `clear` + `setDefaultReservationId` +
@@ -611,9 +757,10 @@ ImageManager.clearRequest = function(){
 };
 "##;
 
-/// `ImageManager` 的 **request / reserve 两族的薄壳**（`rpg_managers.js:904-1068` 逐字，19 格），
-/// 外加**四格自创的底**（M10.4 第二格之前是五格：`_imageCache` 那一格已经换成上游那颗真的
-/// `new ImageCache()`，见 [`IMAGE_MANAGER_CACHE_JS`]）。
+/// `ImageManager` 的 **request / reserve 两族的薄壳**（`rpg_managers.js:873-1068` 逐字，**20 格**：
+/// 原先那 19 格薄壳 + M10.5 第四格换回逐字的 `loadEmptyBitmap`），外加**两格自创的底**。
+/// （M10.4 第二格之前是五格自创：`_imageCache` 那一格已经换成上游那颗真的 `new ImageCache()`，
+/// 见 [`IMAGE_MANAGER_CACHE_JS`]。）
 ///
 /// 为什么这一族随 M10.3 的 d 交，而不是等 M10.4：`Game_Interpreter.prototype.setup`
 /// （`rpg_objects.js:8801-8806`）**无条件**调静态的 `Game_Interpreter.requestImages(list)`，
@@ -626,21 +773,21 @@ ImageManager.clearRequest = function(){
 /// （`folder + encodeURIComponent(filename) + '.png'` 与那十四个 `img/…/` 目录名），
 /// 而这一串正是移植侧的预取泵与 `VfsPath` 规范化要对表的东西（`AGENTS.md` 咬人第 32 条⑶同一条腿）。
 ///
-/// **底下四格是自创的**（`_sisfHandle`/`loadEmptyBitmap`/`requestNormalBitmap`/`reserveNormalBitmap`）：
-/// 上游那四格的底是 `Bitmap`（`rpg_core.js`，38 条里 **22 条有硬底**、16 条没有，而"没有"里好几条
-/// 又落在硬底的下一格上），本轮不交。四格的**账目走上面那颗真 `ImageCache`**，与上游逐字的差只有
-/// 替换掉的三处：⑴ `Bitmap.request(path)` / `new Bitmap()` → `this._sisfHandle(…)`；
-/// ⑵ `loadNormalBitmap(path, hue)` → `requestNormalBitmap(path, hue)`（load 那一族底下是
-/// `Bitmap.load` → `_requestImage`，DOM `Image` + `Decrypter.decryptImg`，本轮不交）；
-/// ⑶ `addLoadListener(function(){ bitmap.rotateHue(hue); })` 那一整支不挂 —— 这不是"顺手省掉"：
-/// `rotateHue` 对 `hue == 0` 在上游就是**立刻返回**（`:1448` 的
+/// **底下两格是自创的**（`requestNormalBitmap`/`reserveNormalBitmap`）—— 从 M10.5 第四格起
+/// 底的其余部分**就是上游那一颗真的 `Bitmap`**（`Bitmap.request(path)`），与逐字的差只剩"那一支
+/// hue 监听器不挂"这一处；原先的四格减成两格，走的正是上面那条路（`loadEmptyBitmap` 换回逐字的
+/// `new Bitmap()`，`_sisfHandle` **整格删掉** —— 那颗句柄的尺寸恒 0，于是 `_truncateCache` 永远不裁）。
+/// 剩下的那一处差是⑶：`addLoadListener(function(){ bitmap.rotateHue(hue); })` 那一整支不挂 ——
+/// 这不是"顺手省掉"：`rotateHue` 对 `hue == 0` 在上游就是**立刻返回**（`:1448` 的
 /// `if (offset && this.width > 0 && this.height > 0)`），而 `Game_Interpreter.requestImages`
 /// 那一条腿**一支 hue 都不传**（`:10516-10576` 全是单参调用 ⇒ `hue || 0`）。数据侧的非零 hue 也量了
 /// （`core-touch.py --demand`）：`Animations.json` 444 条里 32 条、`Enemies.json` 234 条里 4 条，
-/// 两族都走 sprites / 战斗那一侧（M10.5 与非目标）。
+/// 两族都走 sprites / 战斗那一侧（M10.5 与非目标）。而 `Bitmap.load` 在我们的读取腿上是**同步**
+/// 就绪的 ⇒ 那支监听器会在 `load` 那一拍当场跑掉，`rotateHue` 没交就是当场抛 ——
+/// 这一格因此还不能逐字，`loadNormalBitmap` 也还不能交（它同一支监听器）。
 ///
-/// 换底的时候上面那 19 格一个字都不动，而判据
-/// `the_home_made_image_manager_bases_are_exactly_four` 会先红（它原来钉的是五格），逼着把账改过来。
+/// 换底的时候上面那 20 格一个字都不动，而判据
+/// `the_home_made_image_manager_bases_are_exactly_two` 会先红（它原来钉的是四格），逼着把账改过来。
 pub const IMAGE_MANAGER_REQUEST_JS: &str = r##"
 ImageManager.requestAnimation = function(filename, hue) {
     return this.requestBitmap('img/animations/', filename, hue, true);
@@ -709,6 +856,22 @@ ImageManager.requestBitmap = function(folder, filename, hue, smooth) {
     }
 };
 
+// ↑ 上游 `:967-969`；↓ 这一格是 **M10.5 场景第一段带来的**（`rpg_managers.js:963-965` 逐字）。
+// 为什么必须**与那四颗 `Scene_*` 同一轮交**（2026-10-06 实测）：`DataManager.onLoad` 里那句
+// `Scene_Boot.loadSystemImages()` 是**守卫而不是删句**（上面第 285 行那一段注释写的正是这一格），
+// 而交出的场景文本**当场就把守卫打开了** ⇒ `loadDatabase` 读 `System.json` 的那一刻就喊
+// `reserveSystem` 十次。少这一格的表征不是"标题图没预取"，而是 **TypeError 从 onLoad 里抛穿
+// `loadDatabase`**，于是它后面那五张表（`MapInfos` 那一族）一条都没读进来 ——
+// `isDatabaseLoaded()` 从此恒假，整套层上每一条用真库的判据一起红。
+// ↑ 上游 `:963-965`；↓ `reserveFace` 与它同一条腿，理由见上面 `loadFace` 那一段（`:943-945` 逐字）。
+ImageManager.reserveFace = function(filename, hue, reservationId) {
+    return this.reserveBitmap('img/faces/', filename, hue, true, reservationId);
+};
+
+ImageManager.reserveSystem = function(filename, hue, reservationId) {
+    return this.reserveBitmap('img/system/', filename, hue, false, reservationId || this._systemReservationId);
+};
+
 ImageManager.reserveTileset = function(filename, hue, reservationId) {
     return this.reserveBitmap('img/tilesets/', filename, hue, false, reservationId);
 };
@@ -732,32 +895,12 @@ ImageManager.isReady = function() {
     return this._imageCache.isReady();
 };
 
-// ↓↓↓ 上面到这一行为止都是**上游逐字**。下面四格是**自创的底**（见文档注释）：
-// 底是 `Bitmap`（本轮不交），但**账目走上面那颗真的 `ImageCache`/`RequestQueue`** ——
-// 句柄必须答得上缓存问的那九格，否则 `_truncateCache`/`_mustBeHeld`/`isReady`/`RequestQueue.update`
-// 会在自己人不认识的东西上抛（判据 `the_handle_answers_the_cache_contract`）。
-ImageManager._sisfHandle = function(url) {
-    return {
-        url: url,
-        smooth: false,
-        width: 0,
-        height: 0,
-        // 素材的"取"发生在宿主的 VFS/清单那一侧，JS 这一侧的句柄永远算就绪（同 d 那一轮的口径）。
-        isReady: function() { return true; },
-        isError: function() { return false; },
-        // 上游 `isRequestOnly()` 是 `!(this._decodeAfterRequest || this.isReady())` ⇒ 就绪的句柄是 false。
-        isRequestOnly: function() { return false; },
-        isRequestReady: function() { return true; },
-        startRequest: function() {},
-        addLoadListener: function(listener) { listener(this); }
-    };
-};
-
-// 上游 `:873-882`，只有 `new Bitmap()` 那一句换成句柄（`Bitmap` 的构造体第一句就是 `_createCanvas`）。
+// 上游 `:873-882` **逐字**（M10.5 第四格之前这里是自创的 `_sisfHandle('')`，因为那时 `new Bitmap()`
+// 的第一句 `this._createCanvas(width, height)`（`rpg_core.js:831-833`）底下还没有东西）。
 ImageManager.loadEmptyBitmap = function() {
     var empty = this._imageCache.get('empty');
     if(!empty){
-        empty = this._sisfHandle('');
+        empty = new Bitmap();
         this._imageCache.add('empty', empty);
         this._imageCache.reserve('empty', empty, this._systemReservationId);
     }
@@ -765,13 +908,17 @@ ImageManager.loadEmptyBitmap = function() {
     return empty;
 };
 
-// 上游 `:1073-1088`，只有 `Bitmap.request(path)` 换成句柄、`addLoadListener(rotateHue)` 那一支不挂
-// （hue 在已交付的文本里恒 0，理由见文档注释⑶）。
+// ↓↓↓ 上面到这一行为止都是**上游逐字**。下面两格是**自创的底**（见文档注释）：底的其余部分
+// **现在就是上游那一颗真的 `Bitmap`**（`Bitmap.request(path)`），与逐字的差只剩"那一支 hue
+// 监听器不挂"（`rotateHue` 属滤镜那一半，今天没有，理由见文档注释⑶）。
+// 旧的 `_sisfHandle` 那一格随这一轮**整格删掉**：它是 `HOME_MADE` 双向白名单里的名字，
+// 少一格也红（`M10.md` 事实 63 那条纪律要的就是这个样子），而删掉它的理由是量出来的 ——
+// 那颗句柄的尺寸恒 0 ⇒ `_truncateCache` 永远不裁。
 ImageManager.requestNormalBitmap = function(path, hue){
     var key = this._generateCacheKey(path, hue);
     var bitmap = this._imageCache.get(key);
     if(!bitmap){
-        bitmap = this._sisfHandle(path);
+        bitmap = Bitmap.request(path);
         this._imageCache.add(key, bitmap);
         this._requestQueue.enqueue(key, bitmap);
     }else{
@@ -781,7 +928,10 @@ ImageManager.requestNormalBitmap = function(path, hue){
     return bitmap;
 };
 
-// 上游 `:990-995`，只有 `loadNormalBitmap` 换成 `requestNormalBitmap`（load 那一族欠的是 `Bitmap.load`）。
+// 上游 `:990-995`，只有 `loadNormalBitmap` 换成 `requestNormalBitmap` —— 不是因为 `Bitmap.load`
+// 装不动（它这一轮已经逐字在场），而是因为 load 那一条腿的 hue 监听器**当场就会抛**：
+// `Bitmap.load` 在我们的读取腿上是**同步**就绪的，于是 `addLoadListener` 的回调在 `load` 那一拍
+// 就跑掉，而 `rotateHue` 属滤镜那一半、今天没有（文档注释⑶）。
 ImageManager.reserveNormalBitmap = function(path, hue, reservationId){
     var bitmap = this.requestNormalBitmap(path, hue);
     this._imageCache.reserve(this._generateCacheKey(path, hue), bitmap, reservationId);
@@ -847,6 +997,11 @@ pub fn install(host: &Host, vfs: Rc<Vfs>) -> Result<(), String> {
     // 2026-10-05 的真数据判据第一次就是这么红的：`typeof JsonEx.parse` 是 `undefined`，
     // 而 `LZString.decompressFromBase64` 明明在场 —— 红在"谁装 core 的那一格"，不是红在算法。
     crate::core::install_json_ex(host)?;
+    // **`Bitmap` 那一格也在这一档自己装**（它要 `vfs`，所以不在 `core::install` 里）：
+    // `IMAGE_MANAGER_REQUEST_JS` 的 `loadEmptyBitmap` 是上游逐字的 `new Bitmap()`，
+    // `requestNormalBitmap` 是 `Bitmap.request(path)` ⇒ 少这一格就是"缓存里存的是句柄"那一档旧账。
+    // 次序由本族自己负，与上面两条同一条腿。
+    crate::core::install_bitmap(host, Rc::clone(&vfs))?;
     for text in [
         // 库那一族排在最前：它是**一颗 `var`**，后面每一段都可能喊它（今天喊它的是
         // `StorageManager`/`DataManager` 的存档那一句，还没交）。
@@ -857,7 +1012,10 @@ pub fn install(host: &Host, vfs: Rc<Vfs>) -> Result<(), String> {
         CREATE_GAME_OBJECTS_JS,
         TEXT_MANAGER_JS,
         IMAGE_MANAGER_NAMES_JS,
+        IMAGE_MANAGER_LOAD_JS,
         SCENE_MANAGER_SWITCH_JS,
+        MANAGERS_SCENE_LOOP_JS,
+        MANAGERS_SCENE_HOST_JS,
         IMAGE_MANAGER_CACHE_JS,
         IMAGE_MANAGER_REQUEST_JS,
     ] {
@@ -918,6 +1076,14 @@ mod tests {
         "ImageCache",
         "RequestQueue",
         "WebAudio",
+        // M10.5 第四格：`managers::install` 现在自己先装 `Bitmap` 那一整格
+        // （`ImageManager.loadEmptyBitmap` 换回上游逐字的 `new Bitmap()`，`requestNormalBitmap`
+        // 换成 `Bitmap.request(path)`），而它脚下要 `Point`/`Rectangle` 两颗壳。
+        // **同一课第三次**（事实 78：谁喊它谁自己装，而 fixture 的名单要在同一轮里改）：
+        // 不点名就是 `Bitmap is not defined`，这一族 29 条判据一起红。
+        "Bitmap",
+        "Point",
+        "Rectangle",
     ];
 
     /// fixture 的密钥：**运行期算出来**，源码里一个 hex 字面量都不写。
@@ -1033,6 +1199,33 @@ mod tests {
 
     fn booted_default() -> Host {
         booted(fixture_data())
+    }
+
+    /// 同一份夹具，**再加上平台件那一层与它开机的那两句**（`Input.initialize`/`TouchInput.initialize`）。
+    ///
+    /// 只有主循环那一族的输入那一拍要它：`SceneManager.updateInputData` 的体是
+    /// `Input.update(); TouchInput.update();`（`rpg_managers.js:1968-1971`），两颗都住在
+    /// `platform.rs`，而 `TouchInput.update` 读的是 `_preEvents` —— 那一格由
+    /// `TouchInput.initialize`（移植侧那一颗的体只剩 `this.clear()`，DOM 监听器那一半**有意没交**）
+    /// 立起来。上游那两句住在 `SceneManager.initialize()`（开机那一族，按定案不交）⇒
+    /// **移植侧的开机归宿主**，同一形状落在 `../sisf_pray/src/compat_scene.rs::boot_scene_leg`。
+    /// `platform::install` 的前置是它自己那四颗静态类壳（`Utils`/`Input`/`TouchInput`/
+    /// `ResourceHandler`，写在它的模块头"必须在 `shapes::install` 之后"那一句旁边），而 managers
+    /// 夹具的名单里没有它们 ⇒ 这里补一次声明。
+    fn booted_with_input() -> Host {
+        let host = booted_default();
+        let shells: Vec<DeclaredShape> = ["Utils", "Input", "TouchInput", "ResourceHandler"]
+            .iter()
+            .map(|n| DeclaredShape {
+                name: (*n).to_string(),
+                kind: ShapeKind::StaticClass,
+            })
+            .collect();
+        shapes::install(&host, &shells).expect("平台件那四颗壳装不上");
+        crate::platform::install(&host).expect("平台件装不上（输入那一拍的底）");
+        host.eval("Input.initialize(); TouchInput.initialize();")
+            .expect("输入那两颗的开机两句跑不动（`_preEvents` 那一格就是它立的）");
+        host
     }
 
     #[test]
@@ -1347,12 +1540,15 @@ out.join('|')
         );
     }
 
-    /// `command282`（Change Tileset）那一格要的三句：`reserveTileset` 交回"就绪"的句柄、
+    /// `command282`（Change Tileset）那一格要的三句：`reserveTileset` 交回的位图自己说就绪、
     /// `releaseReservation` 不抛、`isReady()` 说整个缓存都到位了。
     ///
-    /// 上游那一句 `allReady = ….every(function(bitmap) { return bitmap.isReady(); })` 读的是**句柄**，
-    /// 所以这一族的落点只要"每颗句柄自己说就绪"就够了；`_waitMode === 'image'` 那一格同一把尺子
-    /// （`updateWaitMode` 比的是 `!ImageManager.isReady()`）⇒ 不等待，与上游"字节已在内存"同答案。
+    /// 上游那一句 `allReady = ….every(function(bitmap) { return bitmap.isReady(); })` 读的是**位图**，
+    /// 而 `_waitMode === 'image'` 那一格比的是 `!ImageManager.isReady()`。M10.5 第四格之前
+    /// 这两句都恒真（句柄谎称就绪 ⇒ 等待腿一拍就放行）；现在第一格是 **false**（真位图还在
+    /// `'pending'`），而第五格仍然 true —— 因为 `:547-552` 只问**不是 request-only 又没就绪**的那些。
+    /// ⇒ 三格的读数合起来是"等待腿从此真的等，等到场景主循环泵队列那一拍"（`SceneManager`
+    /// 那一格属 M10.5 的 ⑥，见 `the_request_queue_drains_only_when_the_scene_loop_pumps`）。
     #[test]
     fn the_reservation_leg_answers_for_command282() {
         let host = booted_default();
@@ -1369,33 +1565,49 @@ out.join('|')
 "#;
         assert_eq!(
             host.eval_string(js),
-            "true|img/tilesets/World_A1.png|true||true|released"
+            "false|img/tilesets/World_A1.png|true||true|released",
+            "第一格 false 是**换底的账单**（旧句柄那一版恒 true）：刚报进队列、还没 `startRequest()` \
+             的真位图在上游是 `'pending'`。第三格 true 是空图名那颗 `new Bitmap()`（状态 'none' ⇒ \
+             就绪），第五格 true 靠的是 pending 条目被 `isRequestOnly()` 跳过（`:547-552`）—— \
+             三格一起钉，免得下一轮有人把其中一格「修」回谎"
         );
     }
 
-    /// **自创面只许这四格**（`tools/probes/objects-verbatim.py` 的 `HOME_MADE` 白名单是同一份账）。
+    /// **自创面只许这两格**（`tools/probes/objects-verbatim.py` 的 `HOME_MADE` 白名单是同一份账）。
     ///
-    /// M10.4 的第二格把五格减到四格：`_imageCache` 那一格不再是自创的对象，而是上游那句
-    /// `new ImageCache()`（`rpg_managers.js:795`）⇒ 这一条同时钉住"缓存底已经换成真的"。
-    /// 剩下的四格都欠同一颗类：`Bitmap`。位图那半落地时这一条**先红**，逼着改账。
+    /// M10.4 的第二格把五格减到四格（`_imageCache` 换回上游那句 `new ImageCache()`），
+    /// M10.5 的第四格再减到**两格**：`loadEmptyBitmap` 换回逐字的 `new Bitmap()`，
+    /// 而 `_sisfHandle` 那一格**整格销账**（下面钉它的 `typeof` 是 `undefined` —— 双向白名单
+    /// 要的就是这一手：多一格红，少一格也红）。剩下的两格只欠"那一支 hue 监听器"
+    /// —— 那一支今天通了（`rotateHue` 已回归逐字），所以 `loadNormalBitmap` 换成了**上游文本**，
+    /// 而白名单仍是两格：自创面没有因此涨一格。
+    /// 后四格钉的是**底的真实性**：三颗缓存类实例 + `empty` 那颗是 `Bitmap` 而且尺寸是上游的 1×1
+    /// （`_createCanvas` 的 `Math.max(width || 0, 1)`）—— 旧句柄在这一格读出来是 0。
     #[test]
-    fn the_home_made_image_manager_bases_are_exactly_four() {
+    fn the_home_made_image_manager_bases_are_exactly_two() {
         let host = booted_default();
         let js = r#"
-var bases = ['_sisfHandle', 'loadEmptyBitmap', 'requestNormalBitmap', 'reserveNormalBitmap'];
+var bases = ['requestNormalBitmap', 'reserveNormalBitmap'];
 var out = [];
 for (var i = 0; i < bases.length; i++) out.push(typeof ImageManager[bases[i]]);
+out.push(String(typeof ImageManager._sisfHandle));
 out.push(String(ImageManager._imageCache instanceof ImageCache));
 out.push(String(ImageManager._requestQueue instanceof RequestQueue));
 out.push(String(ImageManager.cache instanceof CacheMap));
 out.push(String(typeof ImageManager.loadNormalBitmap));
+out.push(String(ImageManager.loadEmptyBitmap() instanceof Bitmap));
+out.push(String(ImageManager.loadEmptyBitmap().width) + ',' + String(ImageManager.loadEmptyBitmap().height));
 out.join('|')
 "#;
         assert_eq!(
             host.eval_string(js),
-            "function|function|function|function|true|true|true|undefined",
-            "四格函数底在场、三颗静态底是**上游那三颗类的实例**，而 `loadNormalBitmap` 这一族仍然没交 \
-             （它底下是 `Bitmap.load` → `_requestImage`）—— 最后一格钉的就是这一格还没还"
+            "function|function|undefined|true|true|true|function|true|1,1",
+            "`_sisfHandle` 必须**已经不在**（销账）；`loadNormalBitmap` 今天**是 function** —— 它原来记为\
+             「还没交」的理由是「那一支 hue 监听器会当场抛」，而 `Bitmap.prototype.rotateHue` 在\
+             M10.5 的滤镜那一格回归逐字之后**已经落得下去**，于是这一格随 M10.5 场景第二段交\
+             （**自创面仍然只有那两格**：`requestNormalBitmap`/`reserveNormalBitmap`）；\
+             `empty` 那颗现在是真的 `Bitmap`、尺寸是上游 `new Bitmap()` 的 1×1 ——\
+             句柄那一版这里是 0,0，`_truncateCache` 因此永远不裁"
         );
         host.eval(IMAGE_MANAGER_REQUEST_JS)
             .expect("request 那一族第二次装不上（自创的底不许只许装一次）");
@@ -1405,40 +1617,43 @@ out.join('|')
         );
     }
 
-    /// 缓存四颗问"存进去的那个东西"的**九格契约**，宿主的句柄必须全答得上。
+    /// 缓存四颗问"存进去的那个东西"的**契约**，现在问的是**上游那一颗真的 `Bitmap`**
+    /// （旧的 `_sisfHandle` 那一版钉的是"宿主自己写的对象形状对不对"，那一格已经没有了）。
     ///
-    /// 这是换底的那一格真代价：底从"永远就绪的空壳"换成上游的 `ImageCache` 之后，
-    /// `_truncateCache` 会读 `width*height`、`_mustBeHeld` 与 `isReady` 会喊三个谓词、
-    /// `RequestQueue.update` 会喊 `isRequestReady()`/`startRequest()`。少一格就是**缓存自己**
-    /// 在 `command282` 那一拍上抛，而不是位图那半的账。
-    /// 尺寸恒 0 的那两格是**有意**的（像素不在 JS 这一侧）⇒ 裁cache永远不触发，
-    /// 由 [`crate::core`] 的 `truncation_fires_only_once_the_items_have_dimensions` 钉住那一段账。
+    /// 这一条同时把**取不到素材的那一条腿**钉成上游的样子：夹具 VFS 里没有 `img/faces/x.png`
+    /// ⇒ `startRequest()` 之后是 `_loadingState === 'error'`（`isError()` true、`isReady()` false），
+    /// 而不是旧句柄那句"永远算就绪"。这一格差是玩家能观察的：素材缺失时上游会走
+    /// `DataManager.checkError` 报"读不到"，而说谎的句柄会让画面**安静地少一块**。
     #[test]
     fn the_handle_answers_the_cache_contract() {
         let host = booted_default();
         let js = r#"
 var out = [];
-var h = ImageManager._sisfHandle('img/pictures/x.png');
-out.push(h.url);
-out.push(String(h.width) + ',' + String(h.height));
-out.push(String(h.isReady()));
-out.push(String(h.isError()));
-out.push(String(h.isRequestOnly()));
-out.push(String(h.isRequestReady()));
-var threw = 'no';
-try { h.startRequest(); } catch (e) { threw = 'yes'; }
-out.push(threw);
+var b = ImageManager.requestFace('x');
+out.push(String(b instanceof Bitmap));
+out.push(b.url);
+out.push(String(b.width) + ',' + String(b.height));
+out.push(String(b.isReady()));
+out.push(String(b.isError()));
+out.push(String(b.isRequestOnly()));
+out.push(String(b.isRequestReady()));
 var heard = 'none';
-h.addLoadListener(function(b) { heard = b.url; });
+b.addLoadListener(function(obj) { heard = obj.url; });
 out.push(heard);
-out.push(String(typeof ImageManager.isReady));
+var threw = 'no';
+try { b.startRequest(); } catch (e) { threw = 'yes'; }
+out.push(threw);
+out.push(String(b.isError()) + ',' + String(b.isReady()) + ',' + String(b.isRequestReady()));
+out.push(heard);
 out.join('|')
 "#;
         assert_eq!(
             host.eval_string(js),
-            "img/pictures/x.png|0,0|true|false|false|true|no|img/pictures/x.png|function",
-            "`isRequestOnly()` 必须是 false（就绪的句柄在上游那一支里就不算 request-only），\
-             否则 `ImageCache.isReady()` 会把它整条跳过、`command282` 的等待腿变成「永远说就绪」"
+            "true|img/faces/x.png|0,0|false|false|true|false|none|no|true,false,true|none",
+            "`isRequestOnly()` 必须是 true（pending 且没要求解码）而 `isRequestReady()` 是 false \
+             （`RequestQueue` 因此在排到它之前不动它，同上游）；`startRequest()` 不抛但落成 \
+             `isError()` —— 尺寸恒 0 而**不再谎称就绪**，这是换底的真正代价（旧句柄那一版是 \
+             `true|false|false|true`）。`addLoadListener` 在两拍上都不许跑（没就绪），就绪之后才跑"
         );
     }
 
@@ -1486,6 +1701,10 @@ ImageManager.requestFace('q2');
 out.push(String(ImageManager._requestQueue._queue.length));
 ImageManager.update();
 out.push(String(ImageManager._requestQueue._queue.length));
+ImageManager.update();
+out.push(String(ImageManager._requestQueue._queue.length));
+ImageManager.update();
+out.push(String(ImageManager._requestQueue._queue.length));
 ImageManager.requestFace('q3');
 out.push(String(ImageManager._requestQueue._queue.length));
 ImageManager.clearRequest();
@@ -1494,9 +1713,11 @@ out.join('|')
 "#;
         assert_eq!(
             host.eval_string(js),
-            "2|1|2|0",
-            "`ImageManager.update()` **一拍只推进队首那一格**（上游 `RequestQueue.update` 只看 `_queue[0]`）⇒ \
-             两条要泵两拍才排空。样品句柄 `isRequestReady()` 恒真，所以每一泵都是「放掉队首、让新的队首起跑」；\
+            "2|2|1|0|1|0",
+            "`ImageManager.update()` **一拍只推进队首那一格**（上游 `RequestQueue.update` 只看 \
+             `_queue[0]`）。换底之后第一拍**不减条数**：那一拍只是对队首 `startRequest()`，\
+             而 `isRequestReady()` 要到下一拍才算真 —— 旧的恒就绪句柄第一拍就把它放掉了，那是谎。 \
+             于是两条要泵三拍才排空（起跑、放掉第一条并让第二条起跑、放掉第二条）。\
              真正的在飞顺序由 core 那一格的 `the_request_queue_keeps_one_in_flight_and_raises_priority` 钉"
         );
     }
@@ -1570,8 +1791,12 @@ out.join('|')
         );
         assert_eq!(
             host.eval_string("String(ImageManager.reserveTileset('World_A1', 0, 3).isReady())"),
-            "true",
-            "静态底里的 `new ImageCache()` 已经在场，`reserve` 那一族当场就要用它"
+            "false",
+            "静态底里的 `new ImageCache()` 已经在场，`reserve` 那一族当场就要用它 —— \
+             而 M10.5 第四格之后这一格读的是**真位图**：刚报进队列、还没 `startRequest()` 的那一条\
+             当然是**没就绪**（旧的 `_sisfHandle` 恒 true，那是谎）。`ImageManager.isReady()` 那一头\
+             仍然说 true，因为 pending 的位图 `isRequestOnly()` 为 true、上游的 `:547-552` 把它跳过 —— \
+             两格一起才是上游的形状。"
         );
     }
 
@@ -1608,6 +1833,168 @@ out.join('|')
         host.eval(SCENE_MANAGER_SWITCH_JS)
             .expect("热路径那一格第二次装不上");
         assert!(!host.eval_bool("SceneManager.isSceneChanging()"));
+    }
+
+    /// **主循环那一族的机制判据**（M10.5 真绘制第四小格）：一颗探针场景走
+    /// `goto` → `changeScene` → `updateScene` 的**上游拍序**，移植侧一个字都不改写。
+    /// 钉六格，每一格都是"手写等价物最容易丢掉的那一种"：
+    /// ⑴ `changeScene` 之前必须过 `!isCurrentSceneBusy()` —— 忙的那一拍**整条不走**（`_nextScene`
+    ///   还在、`_scene` 还是旧的），这就是"淡出的 24 拍挡住的是进图"（`AGENTS.md` 咬人第 34 条⑵）
+    ///   在上游的出处；而 `updateScene` 那一拍照旧跑 `_scene.update()`（两格不是一条腿）；
+    /// ⑵ `start()` 只在 `isReady()` 为真的那一拍跑**一次**（`_sceneStarted` 那格旗），之后每拍只有
+    ///   `update()`；⑶ `push` 记进 `_stack` 的是**上一颗的 `constructor`**（不是实例）；
+    /// ⑷ `_previousClass` 是在 `terminate()` **之后**才记 ⇒ `isPreviousScene(上一颗)` 在换完那一拍
+    ///   读得到（`Scene_Map.needsFadeIn` 靠这一格）；⑸ `pop` 回到栈顶那颗，`_stack` 随之变空；
+    /// ⑹ **墙钟那条腿没有漏搬回来**：`update`/`updateMain`/`renderScene`/`snap`/`onSceneLoading`
+    ///   五格今天必须**不在场**（在场就是要么切片漏了 `--skip`、要么有人手写了等价物），
+    ///   而没读者的 `backgroundBitmap()` 交回 `null`（宿主那一格不写 `_backgroundBitmap`）；
+    /// ⑺ **输入那一拍落在泵里，而边的形状是上游的**：`updateInputData`（体只有 `Input.update();
+    ///   TouchInput.update();`）从墙钟那一族里拿出来逐字交之后，`isTriggered` 只在**按下去的那一拍**
+    ///   为真、按着的每一拍只剩 `isPressed`、松键之后两格都假。这一格是台词那一族的前提
+    ///   （`Window_Message` 的翻页、`Window_Command` 的决定键读的都是 `isTriggered('ok')`）。
+    ///
+    /// 两条腿同一条：wasm 腿跑在 node 的共享 realm 里，`goto` 之后本族的旗必须清干净（下面那次
+    /// `SceneManager._scene = null; …`），否则下一条目判据读到的是这一条目留下的场景
+    /// （`M10.md`「这一族的规矩」：手交的文本判决要能装第二次）。
+    #[test]
+    fn the_scene_loop_family_keeps_the_upstream_beat_order() {
+        // 输入那一拍的体是 `Input.update(); TouchInput.update();`（`rpg_managers.js:1968-1971`），
+        // 两颗都住在 `platform.rs` ⇒ 这一格里 managers 第一次在**运行期**踩到平台件那一层
+        // （**装载期**不踩：`managers_install_does_not_depend_on_the_caller_installing_core_first`
+        // 那条判据不动）。**不钉"没装就抛"**：wasm 腿的共享 realm 里前面某条目判据就已经装过平台件，
+        // 那一条负读数会在两条腿上给两个数（`M10.md` 事实 135 那一族）。
+        let host = booted_with_input();
+        let js = r#"
+function ProbeScene() { this.log = []; }
+ProbeScene.prototype.create = function() { this.log.push('create'); };
+ProbeScene.prototype.isReady = function() { return true; };
+ProbeScene.prototype.start = function() { this.log.push('start'); };
+ProbeScene.prototype.update = function() { this.log.push('update'); };
+ProbeScene.prototype.stop = function() { this.log.push('stop'); };
+ProbeScene.prototype.isBusy = function() { return !!this._busy; };
+ProbeScene.prototype.terminate = function() { this.log.push('terminate'); };
+ProbeScene.prototype.attachReservation = function() { this.log.push('attach'); };
+ProbeScene.prototype.detachReservation = function() { this.log.push('detach'); };
+function ProbeNext() { ProbeScene.call(this); }
+ProbeNext.prototype = Object.create(ProbeScene.prototype);
+ProbeNext.prototype.constructor = ProbeNext;
+
+// **移植侧那一拍**：上游 while 体里的那四句，每拍一次（`pump` 的落法见 pray 的 compat_scene）。
+function pump() {
+    SceneManager.updateManagers();
+    SceneManager.updateInputData();
+    SceneManager.changeScene();
+    SceneManager.updateScene();
+}
+var out = [];
+SceneManager.goto(ProbeScene);
+pump();
+out.push(SceneManager._scene.log.join(','));
+out.push(String(SceneManager._sceneStarted));
+pump();
+pump();
+out.push(SceneManager._scene.log.join(','));
+SceneManager._scene._busy = true;
+SceneManager.goto(ProbeNext);
+pump();
+out.push(String(SceneManager._nextScene instanceof ProbeNext));
+out.push(String(SceneManager._scene.constructor === ProbeScene));
+out.push(String(SceneManager.isNextScene(ProbeNext)));
+SceneManager._scene._busy = false;
+SceneManager._stack = [];
+SceneManager.push(ProbeNext);
+out.push(String(SceneManager._stack.length) + ':' + String(SceneManager._stack[0] === ProbeScene));
+pump();
+out.push(SceneManager._scene.log.join(','));
+out.push(String(SceneManager.isPreviousScene(ProbeScene)));
+SceneManager.pop();
+pump();
+out.push(String(SceneManager._scene.constructor === ProbeScene));
+out.push(String(SceneManager._stack.length));
+out.push(typeof SceneManager.update + '/' + typeof SceneManager.updateMain + '/' +
+         typeof SceneManager.renderScene + '/' + typeof SceneManager.snap + '/' +
+         typeof SceneManager.onSceneLoading);
+// **输入那一拍**（`updateInputData` 逐字交回来之后才有的一格读数）：门是上游那三扇之一的
+// `Input._onKeyDown`，键码 13 在 `Input.keyMapper` 里就是 `ok`。三拍问的是上游那一条边的形状：
+// 按下去的那一拍 `isTriggered` 与 `isPressed` 同时真；**接着的每一拍只有 `isPressed`**（`isTriggered`
+// 比的是 `_pressedTime === 0`，而 `Input.update` 每拍给还在按着的那一格 `++`）；松键之后两格都假。
+Input.clear();
+globalThis.__ev = { keyCode: 13, preventDefault: function () {} };
+Input._onKeyDown(__ev);
+pump();
+var pressed = String(Input.isTriggered('ok')) + '/' + String(Input.isPressed('ok'));
+pump();
+var held = String(Input.isTriggered('ok')) + '/' + String(Input.isPressed('ok'));
+Input._onKeyUp(__ev);
+pump();
+var released = String(Input.isTriggered('ok')) + '/' + String(Input.isPressed('ok'));
+out.push(pressed + ' ' + held + ' ' + released);
+out.push(String(SceneManager.backgroundBitmap()));
+// 收尾：把这一条目立起来的场景与旗**擦干净**（共享 realm 那条纪律），输入那一侧也一样。
+Input.clear();
+delete globalThis.__ev;
+SceneManager._scene = null;
+SceneManager._nextScene = null;
+SceneManager._stack = [];
+SceneManager._exiting = false;
+SceneManager._sceneStarted = false;
+SceneManager._previousClass = null;
+out.join(' | ');
+"#;
+        assert_eq!(
+            host.eval_string(js),
+            "attach,create,start,update | true | attach,create,start,update,update,update \
+             | true | true | true | 1:true | attach,create,start,update | true \
+             | true | 0 | undefined/undefined/undefined/undefined/undefined \
+             | true/true false/true false/false | null",
+            "拍序、旗、栈与 `_previousClass` 全对上，而墙钟那五格一格都不许在场；\
+             倒数第二格是**输入那一拍**：按下 `ok` 的那一拍 `isTriggered/isPressed` 同真，\
+             按着的每一拍只剩 `isPressed`，松键之后两格都假"
+        );
+    }
+
+    /// 主循环那一族的**成员面**：14 格数据形状逐字交（初值一个字都不改），三格宿主那一侧的空体
+    /// 在场，而被跳掉的三族一格都没漏进来。
+    ///
+    /// **为什么要有这一条**：`objects-verbatim.py` 那一把**数不到数据形状**（右值不是函数），
+    /// 与 `Tilemap` 那 13 格常量、`TextManager` 那一块访问器同一条腿（`M10.md` 事实 72 那条纪律的
+    /// 第四次兑现）—— 交没交、初值对不对，只有运行期问得出。
+    /// ⚠ 只数**条数**与**逐格的值**，不钉 `Object.getOwnPropertyNames` 的排序串：QuickJS 与 V8
+    /// 给的次序不同（`M10.md` 事实 99）。
+    #[test]
+    fn the_scene_loop_data_shapes_take_their_upstream_initial_values() {
+        let host = booted_default();
+        let js = r#"
+var keys = Object.getOwnPropertyNames(SceneManager);
+var data = keys.filter(function(k) { return k.charAt(0) === '_'; });
+var fn = keys.filter(function(k) { return typeof SceneManager[k] === 'function'; });
+[
+    String(data.length),
+    String(fn.length),
+    SceneManager._screenWidth + '/' + SceneManager._screenHeight + '/' +
+        SceneManager._boxWidth + '/' + SceneManager._boxHeight,
+    String(SceneManager._deltaTime) + '/' + String(SceneManager._accumulator),
+    String(SceneManager._scene) + '/' + String(SceneManager._nextScene) + '/' +
+        String(SceneManager._previousClass) + '/' + String(SceneManager._backgroundBitmap),
+    String(Array.isArray(SceneManager._stack)) + '/' + String(SceneManager._stopped) + '/' +
+        String(SceneManager._sceneStarted) + '/' + String(SceneManager._exiting),
+    String(typeof SceneManager._currentTime),
+    SceneManager.onSceneCreate.length + '/' + SceneManager.onSceneStart.length + '/' +
+        SceneManager.snapForBackground.length,
+    String(SceneManager.onSceneCreate()),
+    String(typeof SceneManager.onSceneLoading)
+].join(' | ');
+"#;
+        assert_eq!(
+            host.eval_string(js),
+            "14 | 20 | 816/624/816/624 | 0.016666666666666666/0 | null/null/null/null \
+             | true/false/false/false | undefined | 0/0/0 | undefined | undefined",
+            "14 格数据形状（上游那 14 格，`_currentTime` 属于墙钟那一族 ⇒ 缺席）+ 20 格函数 \
+             （16 交出的循环族 + `isSceneChanging` 那格原处的 + 3 格宿主的空体；那 16 里包含第五小格\
+             第一小格逐字交回来的 `updateInputData`），\
+             而四格 `816/624` 是**上游初值**：真虚拟屏 1104×736 落在 `Graphics._width/_height`，\
+             改这里就是造第二个真相"
+        );
     }
     /// 两圈的**格数**与 `_path`/`_replayFadeTime` 两格数据形状：`Object.keys` 数出来的
     /// 53 / 27 与 `core-touch.py --demand audio` 那两行读数一字不差（尺子问的是上游文本，

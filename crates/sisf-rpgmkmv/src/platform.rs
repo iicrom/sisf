@@ -862,9 +862,24 @@ mod tests {
         assert_eq!(
             h.eval_string("typeof RegExp.$1"),
             "string",
-            "Annex B 的初值是空串，不是 undefined"
+            "Annex B 的槽必须是**字符串**，不是 undefined（QuickJS 原生读出来是 undefined ⇒ \
+             `parseInt(undefined)` 变 NaN，那一族 notetag 就静默失效）"
         );
-        assert_eq!(h.eval_string("RegExp.$1"), "");
+        // **初值那一格不在这里钉**（2026-10-05 实测改的）：wasm 腿一整个进程共享一个 realm，
+        // `RegExp.$1` 是**全局**的，前面任何一条判据跑过的正则都会留下痕迹 —— 新增 `Bitmap`
+        // 那几条判据之后，这里读到的是别处匹配剩的 `"Error"`（native 腿每条判据一个新 realm，
+        // 永远读到空串，于是只有 wasm 腿红）。同一课见 `M10.md` 事实 78：**钉落点，不钉环境**。
+        // 换成一条两边都成立的钉法：**没有第一捕获组的匹配必须把槽抹成空串**（Annex B 的同一档
+        // 语义，QuickJS 那侧由 `REGEXP_CAPTURE_JS` 的 `arr[i] === undefined ? '' : …` 交出，
+        // node 那侧是原生行为）⇒ 两条腿同一个读数，而且量的就是"空串"这一格。
+        h.eval("globalThis.__u = 'b'.match(/(a)?b/);")
+            .expect("无捕获组那一腿跑不动");
+        assert_eq!(h.eval_string("String(__u !== null)"), "true");
+        assert_eq!(
+            h.eval_string("RegExp.$1"),
+            "",
+            "匹配成功但第一组没落 ⇒ 槽必须是空串（不是 undefined、不是上一次的历史）"
+        );
 
         // ① `.match`（上游用得最多的一条）。
         h.eval("globalThis.__mm = '<Max Item: 30>'.match(/<(?:MAX ITEM):[ ](\\d+)>/i);")

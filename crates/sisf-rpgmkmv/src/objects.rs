@@ -191,6 +191,120 @@ pub fn install(host: &Host) -> Result<(), String> {
     Ok(())
 }
 
+// 兼容层各段 `Game_*` 文本要的形状名单（**a/b/c/d 四族 + 那两份依赖底**）。
+//
+// 这一份从 `mod tests` 挪到模块级（M10.5 的窗那一格）：`crate::windows` 的 fixture 也要摆同一套
+// `$game*` 世界，而**名单抄两遍就会飘**（事实 103 那一条"同一个规则抄两遍就会飘"的 Rust 版本）——
+// 飘了的表征不是红在缺名字那一格，而是红在"解释器起不来"那一条上。
+//
+// 每一族都带 `#[cfg(test)]`：它们是 **fixture 的名单**，真装载链走的是 `shapes::install` 扫出的
+// 那 153 颗 ⇒ 不带的话 lib 构建（非 test）会报"never used"，而 `cargo xtask clippy` 是 `-D warnings`。
+
+/// a 那一族的九个类（`game-touch.py` 的名单：160 + `Game_Picture` 24 = **184** 条方法）。
+#[cfg(test)]
+pub(crate) const CLASSES: &[&str] = &[
+    "Game_Temp",
+    "Game_System",
+    "Game_Timer",
+    "Game_Message",
+    "Game_Switches",
+    "Game_Variables",
+    "Game_SelfSwitches",
+    "Game_Screen",
+    "Game_Picture",
+];
+
+/// b 那一族的十个类（`game-touch.py`：381 + `Game_Vehicle` 32 = **413** 条 prototype 赋值，
+/// 其中 5 条是链的 `constructor` 补句 ⇒ **408** 条方法；再四条跨类样品 = **412** 条）。
+///
+/// `Game_Interpreter` 在这里只为了那四条样品（`initialize`/`clear`/`checkOverflow`/`isRunning`）——
+/// 它的形状必须存在，否则 `new Game_Map()` 在 `Game_Map.initialize` 那一格就抛。
+#[cfg(test)]
+pub(crate) const CLASSES_B: &[&str] = &[
+    "Game_CharacterBase",
+    "Game_Character",
+    "Game_Player",
+    "Game_Follower",
+    "Game_Followers",
+    "Game_Map",
+    "Game_CommonEvent",
+    "Game_Vehicle",
+    "Game_Event",
+    "Game_Interpreter",
+];
+
+/// c 那一族的十一个类（`game-touch.py`：627 条 prototype 赋值，其中 5 条是链的 `constructor`
+/// 补句 ⇒ **622** 条方法）。`leg-deps.py` 量的外部面只有四个名字：`DataManager` 16 处
+/// （四句 `isSkill`/`isItem`/`isWeapon`/`isArmor` 早已随 M10.2 交）、`SoundManager` 12 处（M10.4）、
+/// `TextManager` 4 处（随 M10.2 交）、`BattleManager` 3 处（战斗是定案的非目标）。
+#[cfg(test)]
+pub(crate) const CLASSES_C: &[&str] = &[
+    "Game_Item",
+    "Game_Action",
+    "Game_ActionResult",
+    "Game_BattlerBase",
+    "Game_Battler",
+    "Game_Actor",
+    "Game_Enemy",
+    "Game_Actors",
+    "Game_Unit",
+    "Game_Party",
+    "Game_Troop",
+];
+
+/// d 那一腿只有一颗类，而那颗类就是解释器本身（`game-touch.py`：**151 条**，其中约 100 条
+/// `commandXXX`；没有链、没有 `constructor` 补句）。b 那一轮为 `new Game_Map()` 交的四条样品
+/// （`initialize`/`clear`/`checkOverflow`/`isRunning`）在这一腿的文本里**是同一段上游文本**
+/// ⇒ 交出的名字总数加 147 而不是 151（`tools/probes/objects-verbatim.py` 的口径按名字去重）。
+///
+/// `leg-deps.py --leg d` 量的外部面：八个接收者（`ImageManager` 20 / `SceneManager` 10 /
+/// `AudioManager` 7 / `BattleManager` 5 / `Graphics` 5 / `Utils` 2 / `Input` 1 /
+/// `Window_MenuCommand` 1）+ **八颗裸引用的类名**（`Scene_Battle`/`Scene_Gameover`/`Scene_Menu`/
+/// `Scene_Name`/`Scene_Save`/`Scene_Shop`/`Scene_Title`/`Window_MenuCommand`，**没有一颗是 `new`**）。
+/// 裸引用落在 `SceneManager.goto/push` 的参数上 ⇒ 只查 `NAME.` 的那把尺子看不见它们，
+/// 而它们靠 shapes 那 153 条声明里的 21 颗 `Scene_*` 与 46 颗 `Window_*` 就够得着。
+#[cfg(test)]
+pub(crate) const CLASSES_D: &[&str] = &["Game_Interpreter"];
+
+/// M10.4 第二格起，`ImageManager` 的缓存底要这四颗类的**形状**（`ImageCache`/`RequestQueue`
+/// 沿用壳里那句 `this.initialize.apply(this, arguments);`，`CacheEntry`/`CacheMap` 的构造体
+/// 由 [`crate::core::CACHE_JS`] 覆盖）。真装载链里它们本来就在 `shapes::install` 扫出的那 153 颗内。
+#[cfg(test)]
+pub(crate) const CACHE_CLASSES: &[&str] = &["CacheEntry", "CacheMap", "ImageCache", "RequestQueue"];
+
+/// M10.5 第四格起，`managers::install` 自己会装 `Bitmap` 的数据那一半，而
+/// `ImageManager.requestNormalBitmap` 交的是真的 `Bitmap.request(path)` ⇒ 这一族的 fixture
+/// 也要那三颗形状（`Bitmap` 的构造体沿用壳，`Point`/`Rectangle` 是 `bitmap.rect` 的脚下）。
+/// **同一课**（`M10.md` 事实 78：谁喊它谁自己装，而 fixture 的名单要在同一轮里改）：
+/// 不点名就是 `Bitmap is not defined`，而红的是**解释器起不来**那两条、不是这一格。
+#[cfg(test)]
+pub(crate) const BITMAP_CLASSES: &[&str] = &["Bitmap", "Point", "Rectangle"];
+
+/// a 那一族的体里读到的静态类（`Graphics.frameCount`、`Utils.isOptionValid`，
+/// 以及两处**故意不交**的落点 `AudioManager`/`BattleManager` —— 只有形状在，
+/// 调用才抛得出一句点名是谁的话）。
+#[cfg(test)]
+pub(crate) const STATICS: &[&str] = &[
+    "Utils",
+    "Graphics",
+    "AudioManager",
+    "BattleManager",
+    "DataManager",
+    // c 的 `Game_Actor` 升级/装备那两族读 `TextManager` 的名字（`levelUp`、`equip`…），
+    // 而 `TEXT_MANAGER_JS` 的顶层就往它身上 define 那 64 格 ⇒ 形状必须先在场。
+    "TextManager",
+    // b 那一腿当场要它（`setImage` 问 `isObjectCharacter`、`setupParallax` 问
+    // `isZeroParallax`）；交的只有名字那一半，见 [`crate::managers::IMAGE_MANAGER_NAMES_JS`]。
+    "ImageManager",
+    // c 的 12 处 `SoundManager.play*`（`leg-deps.py`）落在这颗静态类上 —— 形状在、
+    // 成员没交（底下是 `AudioManager`，M10.4），于是那一格抛得出一句点名是谁的话。
+    "SoundManager",
+    // d 的热路径读 `SceneManager.isSceneChanging()`（`Game_Interpreter.update` 的每一轮），
+    // 而那一格就挂在这颗静态类上（`leg-deps.py --leg d` 量的：`SceneManager` 10 处 / 8 个方法，
+    // 其余七处是 `goto`/`push`/`prepareNextScene` ⇒ 记 M10.5 的洞）。
+    "SceneManager",
+];
+
 #[cfg(all(test, feature = "js"))]
 mod tests {
     //! 机制判据：只用 fixture 的数据（这颗 crate 不许知道某一款游戏在哪）。
@@ -200,97 +314,6 @@ mod tests {
 
     #[cfg(target_arch = "wasm32")]
     use wasm_bindgen_test::wasm_bindgen_test as test;
-
-    /// a 那一族的九个类（`game-touch.py` 的名单：160 + `Game_Picture` 24 = **184** 条方法）。
-    const CLASSES: &[&str] = &[
-        "Game_Temp",
-        "Game_System",
-        "Game_Timer",
-        "Game_Message",
-        "Game_Switches",
-        "Game_Variables",
-        "Game_SelfSwitches",
-        "Game_Screen",
-        "Game_Picture",
-    ];
-
-    /// b 那一族的十个类（`game-touch.py`：381 + `Game_Vehicle` 32 = **413** 条 prototype 赋值，
-    /// 其中 5 条是链的 `constructor` 补句 ⇒ **408** 条方法；再四条跨类样品 = **412** 条）。
-    ///
-    /// `Game_Interpreter` 在这里只为了那四条样品（`initialize`/`clear`/`checkOverflow`/`isRunning`）——
-    /// 它的形状必须存在，否则 `new Game_Map()` 在 `Game_Map.initialize` 那一格就抛。
-    const CLASSES_B: &[&str] = &[
-        "Game_CharacterBase",
-        "Game_Character",
-        "Game_Player",
-        "Game_Follower",
-        "Game_Followers",
-        "Game_Map",
-        "Game_CommonEvent",
-        "Game_Vehicle",
-        "Game_Event",
-        "Game_Interpreter",
-    ];
-
-    /// c 那一族的十一个类（`game-touch.py`：627 条 prototype 赋值，其中 5 条是链的 `constructor`
-    /// 补句 ⇒ **622** 条方法）。`leg-deps.py` 量的外部面只有四个名字：`DataManager` 16 处
-    /// （四句 `isSkill`/`isItem`/`isWeapon`/`isArmor` 早已随 M10.2 交）、`SoundManager` 12 处（M10.4）、
-    /// `TextManager` 4 处（随 M10.2 交）、`BattleManager` 3 处（战斗是定案的非目标）。
-    const CLASSES_C: &[&str] = &[
-        "Game_Item",
-        "Game_Action",
-        "Game_ActionResult",
-        "Game_BattlerBase",
-        "Game_Battler",
-        "Game_Actor",
-        "Game_Enemy",
-        "Game_Actors",
-        "Game_Unit",
-        "Game_Party",
-        "Game_Troop",
-    ];
-
-    /// d 那一腿只有一颗类，而那颗类就是解释器本身（`game-touch.py`：**151 条**，其中约 100 条
-    /// `commandXXX`；没有链、没有 `constructor` 补句）。b 那一轮为 `new Game_Map()` 交的四条样品
-    /// （`initialize`/`clear`/`checkOverflow`/`isRunning`）在这一腿的文本里**是同一段上游文本**
-    /// ⇒ 交出的名字总数加 147 而不是 151（`tools/probes/objects-verbatim.py` 的口径按名字去重）。
-    ///
-    /// `leg-deps.py --leg d` 量的外部面：八个接收者（`ImageManager` 20 / `SceneManager` 10 /
-    /// `AudioManager` 7 / `BattleManager` 5 / `Graphics` 5 / `Utils` 2 / `Input` 1 /
-    /// `Window_MenuCommand` 1）+ **八颗裸引用的类名**（`Scene_Battle`/`Scene_Gameover`/`Scene_Menu`/
-    /// `Scene_Name`/`Scene_Save`/`Scene_Shop`/`Scene_Title`/`Window_MenuCommand`，**没有一颗是 `new`**）。
-    /// 裸引用落在 `SceneManager.goto/push` 的参数上 ⇒ 只查 `NAME.` 的那把尺子看不见它们，
-    /// 而它们靠 shapes 那 153 条声明里的 21 颗 `Scene_*` 与 46 颗 `Window_*` 就够得着。
-    const CLASSES_D: &[&str] = &["Game_Interpreter"];
-
-    /// M10.4 第二格起，`ImageManager` 的缓存底要这四颗类的**形状**（`ImageCache`/`RequestQueue`
-    /// 沿用壳里那句 `this.initialize.apply(this, arguments);`，`CacheEntry`/`CacheMap` 的构造体
-    /// 由 [`crate::core::CACHE_JS`] 覆盖）。真装载链里它们本来就在 `shapes::install` 扫出的那 153 颗内。
-    const CACHE_CLASSES: &[&str] = &["CacheEntry", "CacheMap", "ImageCache", "RequestQueue"];
-
-    /// a 那一族的体里读到的静态类（`Graphics.frameCount`、`Utils.isOptionValid`，
-    /// 以及两处**故意不交**的落点 `AudioManager`/`BattleManager` —— 只有形状在，
-    /// 调用才抛得出一句点名是谁的话）。
-    const STATICS: &[&str] = &[
-        "Utils",
-        "Graphics",
-        "AudioManager",
-        "BattleManager",
-        "DataManager",
-        // c 的 `Game_Actor` 升级/装备那两族读 `TextManager` 的名字（`levelUp`、`equip`…），
-        // 而 `TEXT_MANAGER_JS` 的顶层就往它身上 define 那 64 格 ⇒ 形状必须先在场。
-        "TextManager",
-        // b 那一腿当场要它（`setImage` 问 `isObjectCharacter`、`setupParallax` 问
-        // `isZeroParallax`）；交的只有名字那一半，见 [`crate::managers::IMAGE_MANAGER_NAMES_JS`]。
-        "ImageManager",
-        // c 的 12 处 `SoundManager.play*`（`leg-deps.py`）落在这颗静态类上 —— 形状在、
-        // 成员没交（底下是 `AudioManager`，M10.4），于是那一格抛得出一句点名是谁的话。
-        "SoundManager",
-        // d 的热路径读 `SceneManager.isSceneChanging()`（`Game_Interpreter.update` 的每一轮），
-        // 而那一格就挂在这颗静态类上（`leg-deps.py --leg d` 量的：`SceneManager` 10 处 / 8 个方法，
-        // 其余七处是 `goto`/`push`/`prepareNextScene` ⇒ 记 M10.5 的洞）。
-        "SceneManager",
-    ];
 
     /// 装到 a/b/c 三档的一颗宿主（`install()` 交全部三段行为文本）。
     ///
@@ -305,6 +328,7 @@ mod tests {
             .chain(CLASSES_C.iter())
             .chain(CLASSES_D.iter())
             .chain(CACHE_CLASSES.iter())
+            .chain(BITMAP_CLASSES.iter())
             .map(|n| DeclaredShape {
                 name: (*n).to_string(),
                 kind: ShapeKind::Class,
@@ -338,6 +362,14 @@ mod tests {
         // core 的缓存四颗 + `ImageManager` 的九格静态底 + 那 19 格薄壳。少任何一份，
         // `setup` 的第一次 `requestImages` 就抛（实测报的是 `not a function`，看不出是谁缺）。
         crate::core::install_cache(&host).expect("core 的缓存四颗装不上");
+        // M10.5 的第四格起，那一族薄壳**脚下踩的还有真的 `Bitmap`**（`loadEmptyBitmap` 是
+        // `new Bitmap()`、`requestNormalBitmap` 是 `Bitmap.request(path)`）⇒ 数据那一半要一起装，
+        // 否则报回来的是 `cannot read property 'apply' of undefined`（shapes 那颗壳的 `initialize`
+        // 还没挂上）—— 同一课：红在"谁装的那一格"，看不出缺谁。
+        // 这里给的是**空 VFS**：这一族的判据只看路径拼写与状态机，不看字节（要字节的账在
+        // `core.rs` 的 `bitmap_booted` 与 `managers.rs` 的夹具里）。
+        crate::core::install_bitmap(&host, std::rc::Rc::new(sisf_asset::Vfs::new()))
+            .expect("`Bitmap` 的数据那一半装不上");
         host.eval(crate::managers::IMAGE_MANAGER_CACHE_JS)
             .expect("ImageManager 的缓存底装不上");
         host.eval(crate::managers::IMAGE_MANAGER_REQUEST_JS)
@@ -2546,17 +2578,16 @@ mod tests {
     /// 不是"取到位图"：移植侧的预取泵用的就是同一串（`AGENTS.md` 咬人第 32 条⑶），
     /// 名字对不上就是浏览器腿"屏幕上没有立绘而且一声不吭"那一格。
     /// `commonList` 那一格是递归的**去重**闸：CE 调自己不许无限展开。
+    ///
+    /// M10.5 的第四格起这一条**不挂记数把手**了：原先钉的是 `ImageManager._sisfHandle`（那颗
+    /// 句柄已经整格销账），现在直接读**真的 `ImageManager._imageCache`** 的键 —— 钉的比原来多一格：
+    /// 路径拼写对，**而且它真的进了缓存**（键是 `path + ':' + hue`，`:799-801`）。
     #[test]
     fn setup_reports_the_images_of_the_whole_list_including_the_common_events() {
         let host = interpreter_host();
         host.eval(
             r#"
-            globalThis.__asked = [];
-            ImageManager._sisfHandle = function (url) {
-                if (url) __asked.push(url);
-                return { url: url, smooth: false, width: 0, height: 0,
-                         isReady: function () { return true; } };
-            };
+            ImageManager.clear();
             $dataCommonEvents[5] = {id: 5, name: 'CE5', trigger: 0, switchId: 1, list: [
                 {code: 101, indent: 0, parameters: ['CEface', 0, 0, 0]},
                 {code: 117, indent: 0, parameters: [5]},
@@ -2564,7 +2595,7 @@ mod tests {
             $dataTilesets[2] = {id: 2, mode: 1, tilesetNames: ['Outside_A1', 'Outside_B']};
             "#,
         )
-        .expect("样品与记数把手摆不上");
+        .expect("样品摆不上");
         start(
             &host,
             "[{code: 101, indent: 0, parameters: ['TCGAlcybase', 1, 0, 0]},
@@ -2576,9 +2607,13 @@ mod tests {
             0,
         );
         assert_eq!(
-            num(&host, "__asked.join('|')"),
-            "img/faces/TCGAlcybase.png|img/faces/CEface.png|img/pictures/pic%20one.png|\
-             img/tilesets/Outside_A1.png|img/tilesets/Outside_B.png",
+            num(
+                &host,
+                "Object.keys(ImageManager._imageCache._items) \
+                 .filter(function(k) { return k !== 'empty'; }).join('|')"
+            ),
+            "img/faces/TCGAlcybase.png:0|img/faces/CEface.png:0|img/pictures/pic%20one.png:0|\
+             img/tilesets/Outside_A1.png:0|img/tilesets/Outside_B.png:0",
             "沿 117 的那一格（CE 自己的头像）与 282 的两张图块名都必须报出来"
         );
     }

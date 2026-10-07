@@ -2471,10 +2471,12 @@ name = "sisf-rpgmkmv"
 version = "0.1.0"
 dependencies = [
  "js-sys",
+ "png",
  "rquickjs",
  "serde",
  "serde_json",
  "sisf-asset",
+ "sisf-media",
  "sisf-rpgmk",
  "thiserror 2.0.20",
  "wasm-bindgen",

@@ -12,7 +12,8 @@
 //!    [`managers`] 交出 managers 族的数据那一半（`Decrypter` 的名字层、`DataManager` 读库、
 //!    `TextManager`），[`objects`] 交出 `Game_*` 族的第一条腿（状态类：开关/变量/自我开关/
 //!    系统/消息/计时/画面效果/图片层），[`plugins`] 读 `plugins.js` 注册表、逐个装载启用那一族并交出账单，
-//!    [`core`] 交出 `rpg_core.js` 的那几格（M10.4 的第一格：`Graphics` 的屏幕读数与报错面）。
+//!    [`core`] 交出 `rpg_core.js` 的那几格（M10.4 的第一格：`Graphics` 的屏幕读数与报错面），
+//!    [`scenes`] 交出 `rpg_scenes.js` 真流闭包里的那四颗 `Scene_*`（M10.5 的场景第一段）。
 //!    目标是让 `js/plugins/` 里的游戏逻辑脚本**原样运行**。
 //!
 //! ## 为什么这一层存在
@@ -29,6 +30,8 @@ pub mod plugins;
 pub mod shapes;
 
 #[cfg(feature = "js")]
+pub mod composite;
+#[cfg(feature = "js")]
 pub mod core;
 #[cfg(feature = "js")]
 pub mod jsrt;
@@ -37,7 +40,17 @@ pub mod managers;
 #[cfg(feature = "js")]
 pub mod objects;
 #[cfg(feature = "js")]
+pub mod paint;
+#[cfg(feature = "js")]
 pub mod platform;
+#[cfg(feature = "js")]
+pub mod raster;
+#[cfg(feature = "js")]
+pub mod scenes;
+#[cfg(feature = "js")]
+pub mod sprites;
+#[cfg(feature = "js")]
+pub mod windows;
 
 // Re-export 常用的东西，让上层不用写 `sisf_rpgmkmv::mv_data::CommonEvent` 这么长。
 pub use decrypt::{HEADER_LEN, decrypt, encrypted_ext, is_encrypted};

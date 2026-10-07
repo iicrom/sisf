@@ -10,6 +10,9 @@ description = "RPG Maker MV 数据解析与资产加载层（通用，不绑定�
 sisf-asset.workspace = true
 # 引擎的地图/事件定义（MapDef, TilesetDef, RawCommand, GameVars...）
 sisf-rpgmk.workspace = true
+# `Bitmap` 的**像素那一半**（M10.5 第四格的第一小格）：把 VFS 交出的字节解成 RGBA8。
+# optional 且只由 `js` 打开 ⇒ 不带兼容层的构建一个解码器都不拉（与 `rquickjs`/`js-sys` 同一配方）。
+sisf-media = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -28,10 +31,22 @@ wasm-bindgen = { workspace = true, optional = true }
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test.workspace = true
 
+# `raster.rs` 的夹具要**自己造一张真 PNG**（2×2 RGBA）喂给同一条 `decode_image` 腿 ⇒ 不留第二个真相。
+# 版本与 workspace 的 png 一致（锁文件本来就只有一份 0.18.1）。
+[dev-dependencies]
+png.workspace = true
+
 [features]
 default = []
 # wasm 浏览器腿的 WebManifest 支持
 web = ["sisf-asset/web"]
 # 兼容层的 JS 运行时（顶替 `rpg_*.js` 之后，插件与事件脚本跑在这一颗引擎上）。
 # 不在 default/native/web 里 ⇒ 默认构建仍然一行 C 都不编（同 `sisf-event/js` 的理由）。
-js = ["dep:rquickjs", "dep:js-sys", "dep:wasm-bindgen"]
+# `sisf-media/image`：`Bitmap` 的像素读数（`getPixel`/`getAlphaPixel`）要走引擎那一条解码腿。
+js = [
+    "dep:rquickjs",
+    "dep:js-sys",
+    "dep:wasm-bindgen",
+    "dep:sisf-media",
+    "sisf-media/image",
+]
