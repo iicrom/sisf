@@ -14,7 +14,7 @@
 //! 真对象**，插件才能用它们的标准写法（别名叠加）把方法套在自己身上；而状态必须**住在 JS 对象上**
 //! （或由 Rust 写成 JS 属性），那 8,075 处跨类字段读才量得到东西。
 //!
-//! 下面 [`tests`] 那四条判据就是这两件事的实测。红了的处置不是"绕过去"，而是**换边界**
+//! 下面 `tests` 那四条判据就是这两件事的实测。红了的处置不是"绕过去"，而是**换边界**
 //! （退回"兼容层只顶替平台那一层、`rpg_*.js` 照跑"）。
 //!
 //! ## 两条腿：同一份 JS 文本、同一组断言，但**接线形状不同**（这一格是量出来的）
@@ -28,7 +28,7 @@
 //! - **native**：`rquickjs::Function::new` 出来的原生函数**直接**当 prototype 方法，闭包第一参
 //!   `This<Object>` 就是接收者 ⇒ 一条 Rust 函数 = 一个方法，中间没有层。
 //! - **wasm**：`wasm_bindgen` 的 `Closure` 是个普通 JS 函数，而 **JS 不会把接收者当参数交给它** ⇒
-//!   必须在 JS 侧套一层跳板（[`BRIDGE_JS`]：`prototype.setValue = function(id,v){ return __sisf_set(this,id,v); }`），
+//!   必须在 JS 侧套一层跳板（`BRIDGE_JS`：`prototype.setValue = function(id,v){ return __sisf_set(this,id,v); }`），
 //!   由跳板把 `this` 显式传进 Rust。⇒ 浏览器腿**每条方法多一个 JS 帧**，而那一族文本只能
 //!   **代码生成**（按方法名单出 `BRIDGE_JS` 那样的十几行），手抄 3,107 条抄不完。
 
@@ -251,12 +251,27 @@ pub mod web {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use js_sys::{Array, Reflect, eval};
+    use js_sys::{Array, Function, Reflect};
     use wasm_bindgen::JsCast;
     use wasm_bindgen::JsValue;
     use wasm_bindgen::closure::Closure;
 
     use super::{BRIDGE_JS, HOST_CLASS_JS, Ledger};
+
+    /// **间接 eval**：取 `globalThis` 上那颗 `eval` 函数来调用（不是 `eval(x)` 那种直接调用点）⇒
+    /// 代码在**全局作用域、非严格**下求值，里面 `X = function(){}` 这类隐式全局才会真的落到 `globalThis`。
+    ///
+    /// 为什么不用 `js_sys::eval`：`--target web` 的 glue 是一颗 **ES 模块**（模块默认 strict），
+    /// `js_sys::eval` 在那个严格上下文里求值 ⇒ 隐式全局赋值抛 `ReferenceError: X is not defined`。
+    /// native 腿的 QuickJS 与 wasm 测试跑的 node（CommonJS）都是 sloppy ⇒ 只有**浏览器**这一条腿会红。
+    /// 兼容层那批构造体（`CacheEntry`/`CacheMap`/`ToneFilter`/`ShaderTilemap`/`Sisf2DContext`/`Sisf2DGradient`…）
+    /// 全按"隐式全局"写，所以修 eval 这一格、不动那批文本。
+    fn indirect_eval(src: &str) -> Result<JsValue, JsValue> {
+        let g = js_sys::global();
+        let f = Reflect::get(&g, &JsValue::from_str("eval"))?;
+        let f: &Function = f.unchecked_ref();
+        f.call1(&g, &JsValue::from_str(src))
+    }
 
     pub struct Host {
         calls: Ledger,
@@ -268,9 +283,9 @@ pub mod web {
     impl Host {
         pub fn boot() -> Self {
             let key = |s: &str| JsValue::from_str(s);
-            // `js_sys::eval` 是**间接 eval** ⇒ 非严格模式下里面声明的 `function`/`var` 落到
-            // globalThis，与 native 腿的 `ctx.eval` 同一格效果。
-            eval(HOST_CLASS_JS).expect("MV 类形状装不进 JS");
+            // `js_sys::eval` 在 `--target web` 的 ES 模块 glue 里是**严格**上下文 ⇒ 隐式全局会抛；
+            // 走 [`indirect_eval`]（全局、非严格），与 native 腿的 `ctx.eval` 同一格效果。
+            indirect_eval(HOST_CLASS_JS).expect("MV 类形状装不进 JS");
             let g = js_sys::global();
 
             let calls: Ledger = Rc::new(RefCell::new(Vec::new()));
@@ -292,7 +307,7 @@ pub mod web {
                 .expect("__sisf_value 挂不上全局");
 
             // 跳板：JS 侧负责把 `this` 交给那两个 Rust 函数。
-            eval(BRIDGE_JS).expect("跳板装不上 prototype");
+            indirect_eval(BRIDGE_JS).expect("跳板装不上 prototype");
 
             Self {
                 calls,
@@ -304,7 +319,7 @@ pub mod web {
         }
 
         pub fn eval(&self, src: &str) -> Result<(), String> {
-            eval(src).map(|_| ()).map_err(|e| format!("{e:?}"))
+            indirect_eval(src).map(|_| ()).map_err(|e| format!("{e:?}"))
         }
 
         pub fn eval_bool(&self, expr: &str) -> bool {
@@ -313,7 +328,7 @@ pub mod web {
         }
 
         pub fn try_eval_bool(&self, expr: &str) -> Result<bool, String> {
-            eval(expr)
+            indirect_eval(expr)
                 .map(|v| v.as_bool().unwrap_or(false))
                 .map_err(|e| format!("{e:?}"))
         }
@@ -324,14 +339,14 @@ pub mod web {
         }
 
         pub fn try_eval_i32(&self, expr: &str) -> Result<i32, String> {
-            eval(expr)
+            indirect_eval(expr)
                 .map(|v| v.as_f64().unwrap_or(f64::NAN) as i32)
                 .map_err(|e| format!("{e:?}"))
         }
 
         /// 读一条 JS 表达式的字符串结果（与 native 腿同名同形，见 `native::Host::try_eval_string`）。
         pub fn try_eval_string(&self, expr: &str) -> Result<String, String> {
-            eval(expr)
+            indirect_eval(expr)
                 .map(|v| v.as_string().unwrap_or_default())
                 .map_err(|e| format!("{e:?}"))
         }

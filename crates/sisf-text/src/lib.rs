@@ -21,7 +21,9 @@ pub mod bundle;
 pub mod draw;
 pub mod layout;
 
-pub use atlas::{FontAtlas, GlyphRect, MASK_EPOCH, MAX_RASTER_SCALE, raster_scale_for};
+pub use atlas::{
+    FontAtlas, GlyphCoverage, GlyphRect, MASK_EPOCH, MAX_RASTER_SCALE, raster_scale_for,
+};
 pub use bundle::{FontBundle, FontError, WarnOnce};
 pub use draw::TextEngine;
 pub use layout::{Align, GlyphKey, PlacedGlyph, TextLine, TextRun, TextStyle, layout};

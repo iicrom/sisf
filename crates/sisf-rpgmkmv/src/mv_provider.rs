@@ -7,7 +7,7 @@
 //! 2. **明文回退**：加密名不在磁盘上就回退原名。上游 `_ignoreList` 的 `img/system/Window.png`、
 //!    实测也明文的 `Loading.png`、`img/pictures/*.bmp`（bmp 根本没有加密名映射）、
 //!    `data/*.json`、`fonts/*` 全走这条路 —— 判定靠 `is_encrypted` 的头，不靠扩展名。
-//! 3. **解密**：拿到带 MV 16 字节头的字节就地解（[`crate::decrypt`]），内存里完成，
+//! 3. **解密**：拿到带 MV 16 字节头的字节就地解（[`mod@crate::decrypt`]），内存里完成，
 //!    绝不落明文镜像（AGENTS.md 定案：不复制素材）。
 //!
 //! 另有一条消极职责：`js/` 整棵树对本 VFS **不可见**。上游 103 个启用插件一个都不移植，而引擎的
@@ -89,8 +89,8 @@ impl MvAssets {
 /// `img/characters/AAlcy.rpgmvp`，而请求方多半写的是 `AAlcy.png`，所以"原始拼写 +
 /// 加密扩展名"必须排在第一。大小写不敏感的卷上四条会塌成一条。
 ///
-/// wasm 那条按需预取的腿（[`crate::web`]）用的也是这一份 —— 它按这些拼写去 fetch、
-/// fetch 到的字节也按这些拼写灌回 [`sisf::asset::WebManifest`]，所以 [`MvAssets::exists`]
+/// wasm 那条按需预取的腿（`web`，住在 pray 侧）用的也是这一份 —— 它按这些拼写去 fetch、
+/// fetch 到的字节也按这些拼写灌回 `WebManifest`，所以 [`MvAssets::exists`]
 /// 才问得出"到没到"。留第二份候选表就会两边不一致（加载器永远等一条磁盘上有的路径）。
 pub fn candidates(path: &VfsPath) -> Vec<String> {
     let key = path.as_str();

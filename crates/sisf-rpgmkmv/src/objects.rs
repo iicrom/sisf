@@ -22,7 +22,7 @@
 //!    方法在 [`GAME_MAP_AND_EVENTS_JS`] 里，实例在 `createGameObjects` 里 ⇒ c 之后**两处都齐**
 //!    （[`crate::managers`] 那一条判据钉"三张表各写一格，旗立三次"）。
 //!    判据一边钉"有实例就真敲"，一边钉"没有实例就抛、不许悄悄不敲"
-//!    （[`the_write_holes_before_the_map_is_built_and_says_why`]）。
+//!    （`the_write_holes_before_the_map_is_built_and_says_why`）。
 //! 3. **`Game_Timer.onExpire` 落 `BattleManager.abort()`**：成员未交（M10.5 的 `scenes` 那一族）。
 //! 4. **`Game_Screen.realPictureId` 读 `$gameParty.inBattle()`**：c 之后**够得着**了
 //!    （[`GAME_ACTOR_AND_PARTY_JS`] 交出 `Game_Party.inBattle`），前提是 `$gameParty` 是实例
@@ -58,7 +58,7 @@
 //!      剩下两格是**记了名的洞** —— `SoundManager.play*`（11 条成员、全在"结果落地/倒下的表演"
 //!      那一条腿上，底下是 `AudioManager` ⇒ M10.4）与 `BattleManager` 的
 //!      `isForcedTurn`/`canEscape`/`isTurnEnd`（战斗是定案的非目标）。判据一边把 c 的**不碰这两格**
-//!      的路径跑通，一边钉"撞到那一格会抛、而且点名是谁"（[`the_battler_reaches_the_undelivered_managers_and_says_who`]）。
+//!      的路径跑通，一边钉"撞到那一格会抛、而且点名是谁"（`the_battler_reaches_the_undelivered_managers_and_says_who`）。
 
 use crate::jsrt::Host;
 
@@ -68,7 +68,7 @@ use crate::jsrt::Host;
 /// 上游那十三句本来就没守卫，而"重新装载一次就把活着的实例抹回 null"正是上游那份文件被
 /// 重新 `<script>` 一遍时的行为 —— 建回它们的那一格是 `DataManager.createGameObjects()`。
 /// 顺带这一手让 node 那条测试腿（共享一个 realm）的判据彼此**不串味**：每条判据开头调一次
-/// [`booted`] 就拿到一套干净的 null。
+/// `booted` 就拿到一套干净的 null。
 pub const GAME_GLOBALS_JS: &str = r#"
 globalThis.$gameTemp         = null;
 globalThis.$gameSystem       = null;

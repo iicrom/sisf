@@ -28,7 +28,7 @@
 //! 上游交给 `_requestImage` 的是 **URL**（`ImageManager.requestBitmap` 的
 //! `folder + encodeURIComponent(filename) + '.png'`，`rpg_managers.js:1062-1071`），浏览器取字节之前
 //! 自己会把它解回字节路径；而 `loadNormalBitmap`（`:884-898`）上游**已经**先 `decodeURIComponent` 了。
-//! ⇒ VFS 要的拼写在两条腿上不同，所以 [`Rasters::decoded`] 做**宽松**的百分号解码：`%XX` 是两位十六进制
+//! ⇒ VFS 要的拼写在两条腿上不同，所以 `Rasters::decoded` 做**宽松**的百分号解码：`%XX` 是两位十六进制
 //! 才折，否则原样留着（这样真名叫 `50%.png` 的素材不会被解坏）。解码只在 Rust 做一次，
 //! JS 那两格自创底把 `_url` 原样交过来 —— 两处各解一遍就是第二个真相。
 
@@ -198,7 +198,7 @@ impl Rasters {
     ///
     /// 进来的数在 JS 那一侧已经过 `Uint8ClampedArray`（夹到 0..=255、小数按最近偶数舍 ——
     /// 上游 `adjustTone` 的 `pixels[i] += r` 与 `rotateHue` 的浮点 `hslToRgb` 都靠它），
-    /// 但它跨边界的形式是**文本**，所以这一层仍然自己夹一次并给坏形状点名（见 [`parse_cell`]）。
+    /// 但它跨边界的形式是**文本**，所以这一层仍然自己夹一次并给坏形状点名（见 `parse_cell`）。
     ///
     /// 参数的形状就是那条 transport 的形状（位图号 + URL + 矩形 + 那一串格）—— 收成一个
     /// `Rect` 只会把一次拆分搬两遍，所以照引擎那一侧的同一格写法

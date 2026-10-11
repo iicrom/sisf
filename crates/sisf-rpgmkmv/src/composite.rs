@@ -20,14 +20,20 @@
 //! 1. **回放不是重画一遍上游**：`Bitmap.blt` 里那道 `sx + sw <= source.width` 的闸、`drawText` 的
 //!    对齐与 `maxWidth`、`adjustTone` 的算术，全都已经在上游那一格里算完并落成一条操作
 //!    （第二、三小格）。这一层只吃**操作串**，一条判断都不替上游做。
-//! 2. **认得下的是算术那六格**：`size` · `blt` · `fillRect` · `clearRect` · `gradientFillRect` ·
-//!    `fillArc`（后两名 M10.5 真绘制第二小格加进来 —— 渐变与圆**只需要两格停靠点与一条半径**，
-//!    不需要任何外部素材，所以落在 CPU 这一侧，读像素与上屏两条腿同享一份内容）。
-//!    剩下 [`NOT_SYNTHESIZED`] 那两格（`fillText`/`strokeText`）今天**不回放**，而且每条都要数得出
-//!    名字 —— 文字要的是字形位图，引擎那一份只住图集（`crates/sisf-text/src/atlas.rs:159` 的
-//!    `Page.cpu` 没有公开的读手），CPU 里没有第二份可抄 ⇒ 它归宿主的 GPU 绘制会话。
-//!    混合值同理：[`BLENDS`] 之外的（`difference`/`saturation`/`destination-out`…，尺子第⑤段量的）
-//!    一律**跳过并点名**，不假装画对。
+//! 2. **认得下的是算术那六格 + 正文那一格**：`size` · `blt` · `fillRect` · `clearRect` ·
+//!    `gradientFillRect` · `fillArc`（前六个是**纯算术** —— 渐变与圆只要两格停靠点与一条半径，
+//!    不需要任何外部素材），外加 `fillText` —— 台词的**正文**（M10.5「字形落像素」）。
+//!    `fillText` 要的是**字形位图**，CPU 里没有第二份可抄：引擎那一份只住图集，而它现在有了公开的
+//!    覆盖率读手（`crates/sisf-text/src/atlas.rs` 的 `FontAtlas::glyph_coverage`），所以这一格落法是
+//!    **宿主给一颗字形源**（[`TextRasterSource`]）—— 合成器自己**不认字体、不引 `sisf-text`**（那是
+//!    [`Source`] 那一条纪律的同一面：只吃请求、把取像素这件事交出去），只把请求交给那颗源读回一份
+//!    **已着色的预乘位图**再做一次不缩放的 `blt`。**没接上源时它照旧点名**（[`Report::not_yet`] 里的
+//!    `fillText`）—— 也就是这一格"接上之前"的读数，与 [`crate::raster`] 那边"没有源就交透明"同一条腿。
+//!    剩下 [`NOT_SYNTHESIZED`] 那一格（`strokeText`）今天**还不回放**而且每条都数得出名字 —— 那是
+//!    描边（上游 `Bitmap.drawText` 先 `_drawTextOutline` 再 `_drawTextBody`），CPU 里要它得做真描边
+//!    （对覆盖率做膨胀再挖掉正文），而**正文已经让字读得出来**，缺的只是那圈深色描边 ⇒ 留成点名计数，
+//!    不假装画对（也不静默）。混合值同理：[`BLENDS`] 之外的（`difference`/`saturation`/`destination-out`…，
+//!    尺子第⑤段量的）一律**跳过并点名**，不假装画对。
 //! 3. **像素的域是预乘**（与 [`crate::raster`] 的镜像同一个域）：`source-over` 就是
 //!    `out = src + dst×(1−srcA)`（AGENTS 咬人第 25 条⑵那条腿的另一面），`lighter` 是
 //!    预乘相加再夹到 255。缩放开的是 **nearest** —— 上游 `_smooth` 默认 false（`rpg_core.js:838`）
@@ -41,9 +47,11 @@
 use sisf_media::image::RgbaImage;
 use std::rc::Rc;
 
-/// 今天回放得了的动作（判据 `the_compositor_knows_exactly_the_arithmetic_ops` 数这张表）。
-/// 后两名是 M10.5 真绘制第二小格加进来的：**渐变与圆都是纯算术**（两格停靠点 / 一条半径），
-/// 不需要任何外部素材 ⇒ 落在 CPU 这一侧，读像素与上屏两条腿同享一份内容。
+/// 今天回放得了的动作（判据 `the_action_table_is_split_exactly_once_between_arithmetic_and_rest` 数这张表）。
+/// 前六名是**纯算术**（渐变与圆只要两格停靠点 / 一条半径，不需要任何外部素材）⇒ 落在 CPU 这一侧，
+/// 读像素与上屏两条腿同享一份内容。第七名 `fillText`（M10.5「字形落像素」）要的是**字形**，
+/// CPU 里没有第二份 —— 它靠宿主给的那颗 [`TextRasterSource`] 读回一份已着色的预乘位图再 `blt`；
+/// **没接上那颗源时这一格回落到 [`Report::not_yet`]**（与 [`NOT_SYNTHESIZED`] 同一种点名）。
 pub const SYNTHESIZED: &[&str] = &[
     "size",
     "blt",
@@ -51,11 +59,13 @@ pub const SYNTHESIZED: &[&str] = &[
     "clearRect",
     "gradientFillRect",
     "fillArc",
+    "fillText",
 ];
-/// 表内但**不回放**的动作：每一条都要在报表里数得出名字与次数。
-/// 剩下的这两格要的是**字形位图**，引擎那一份只住图集（`crates/sisf-text/src/atlas.rs:159`，
-/// 它的 CPU 影子没有公开的读手）⇒ 不许在 CPU 里另画一份字。
-pub const NOT_SYNTHESIZED: &[&str] = &["fillText", "strokeText"];
+/// 表内且今天**不回放**的动作：每一条都要在报表里数得出名字与次数。
+/// `strokeText` 要的是**描边**（上游 `Bitmap.drawText` 的 `_drawTextOutline` 那一句），CPU 里要它
+/// 得对覆盖率做膨胀再挖正文 —— 而正文（`fillText`）已经让字读得出来，缺的只是那圈深色描边 ⇒
+/// 留成点名计数，不许静默、也不拿"填一份正文"假装画对了描边。
+pub const NOT_SYNTHESIZED: &[&str] = &["strokeText"];
 /// 认得下的混合值。上游已交文本只会写成 `source-over`（`Bitmap.blt`/`bltImage`，`:1157`/`:1182`），
 /// `lighter` 在这里是为了 `blur` 那一格接上时不用回头改这一层（它现在还没交）。
 pub const BLENDS: &[&str] = &["source-over", "lighter"];
@@ -129,7 +139,27 @@ pub enum Op<'a> {
         rgba: [u32; 4],
         blend: &'a str,
     },
-    /// 表内但不回放（[`NOT_SYNTHESIZED`] 那两格）。`sid` 让这一条落在**正确那颗位图**的账上。
+    /// `fillText|<sid>|<urlencoded 正文>|<x>|<y>|<maxWidth 或 空>|<urlencoded 族>|<字号>|<斜体 0/1>|<对齐>|<基线>|<r>,<g>,<b>,<a>|<线宽>|<blend>`
+    /// （`shim_context.js` 的 `_text('fillText', …)`：14 格字段，与 `strokeText` 同一条形状）
+    ///
+    /// 合成时把这条摊成 [`TextOp`] 交给宿主的 [`TextRasterSource`]（只 `fillText` 走这一格 ——
+    /// `strokeText` 是 [`Op::NotYet`]，见 [`NOT_SYNTHESIZED`]）。正文与族名**不解码**（[`Source`] 那
+    /// 一条纪律：解码只住一处），x/y 已是上游 `drawText` 折过对齐与 `maxWidth` 后的**锚点**。
+    Text {
+        sid: &'a str,
+        text: &'a str,
+        x: f64,
+        y: f64,
+        max_width: f64,
+        family: &'a str,
+        size: f64,
+        italic: bool,
+        align: &'a str,
+        baseline: &'a str,
+        rgba: [u32; 4],
+        blend: &'a str,
+    },
+    /// 表内但不回放（[`NOT_SYNTHESIZED`] 那一格）。`sid` 让这一条落在**正确那颗位图**的账上。
     NotYet { sid: &'a str, action: &'a str },
     /// 表外的动作 —— 出现就意味着操作表与合成器脱钩了（尺子第①段就是为这一格存在）。
     Other(&'a str),
@@ -285,7 +315,30 @@ pub fn parse(spec: &str) -> Op<'_> {
                 _ => Op::Bad,
             }
         }
-        "fillText" | "strokeText" => Op::NotYet { sid, action },
+        "fillText" => {
+            if f.len() != 14 {
+                return Op::Bad;
+            }
+            match (num(f[3]), num(f[4]), num(f[7]), parse_rgba(f[11])) {
+                (Some(x), Some(y), Some(size), Some(rgba)) => Op::Text {
+                    sid,
+                    text: f[2],
+                    x,
+                    y,
+                    // `maxWidth` 上游是 `maxWidth || 0xffffffff`；缺参（空串）读成 0 = 不限宽。
+                    max_width: f[5].parse::<f64>().unwrap_or(0.0),
+                    family: f[6],
+                    size,
+                    italic: f[8] == "1",
+                    align: f[9],
+                    baseline: f[10],
+                    rgba,
+                    blend: f[13],
+                },
+                _ => Op::Bad,
+            }
+        }
+        "strokeText" => Op::NotYet { sid, action },
         "" => Op::Bad,
         other => Op::Other(other),
     }
@@ -295,6 +348,7 @@ pub fn parse(spec: &str) -> Op<'_> {
 pub fn target<'a>(op: &Op<'a>) -> Option<&'a str> {
     match op {
         Op::Size { sid, .. }
+        | Op::Text { sid, .. }
         | Op::NotYet { sid, .. }
         | Op::GradientRect { sid, .. }
         | Op::Arc { sid, .. } => Some(sid),
@@ -402,7 +456,61 @@ impl Canvas {
 /// 交 `None` = 这一张既没合成过也没有镜像（或循环引用）⇒ 上游在这一格画的就是透明。
 pub type Source<'a> = dyn Fn(&str, &str) -> Option<Rc<RgbaImage>> + 'a;
 
-/// 把 `ops` 里属于 `sid` 的那几条回放进 `canvas`。
+/// 一次字形请求的形状：一条 `fillText` 操作摊平到"要哪串字、落在哪、长什么样"这一层。
+///
+/// 与 [`Source`] 同一条纪律：**正文与族名都还是 `encodeURIComponent` 过的那一串**，解码住在源那一侧
+/// （`paint::decode_percent` 那唯一的一处），合成器不先解一遍（两处各解就是第二个真相）。
+#[derive(Debug)]
+pub struct TextOp<'a> {
+    pub sid: &'a str,
+    /// 编码过的正文。
+    pub text: &'a str,
+    /// 上游 `drawText` 已折过对齐与 `maxWidth` 之后的**锚点**（像素）。
+    pub x: f64,
+    pub y: f64,
+    /// `maxWidth`：0 = 不限宽（上游的 `maxWidth || 0xffffffff` 缺参那一格读成 0）。
+    pub max_width: f64,
+    /// 编码过的族名（本工程一律走"自带字体优先"那一张脸，族名只进账 —— 见宿主那一侧）。
+    pub family: &'a str,
+    pub size: f64,
+    pub italic: bool,
+    /// `left`/`center`/`right`（或 `start`/`end`）—— 相对锚点 `x` 的横向锚定。
+    pub align: &'a str,
+    /// 上游恒 `alphabetic`（基线在 `y`）；`top` 时整块在 `y` 之下。
+    pub baseline: &'a str,
+    /// **非预乘**的颜色（与 `fillRect` 那一条同一个域，0..255）—— 源那一侧负责预乘。
+    pub rgba: [u32; 4],
+    pub blend: &'a str,
+}
+
+/// 字形源交回的一份**已预乘**位图 + 相对 `(op.x, op.y)` 的整数落点（对齐与基线已经折进 `dx/dy`）。
+///
+/// `image` 的像素就在 [`crate::raster`] 的同一个预乘域里（`color × 覆盖率`，覆盖率就是那一格的 alpha），
+/// 合成器拿它做一次**不缩放**的 `blt` 即可 —— 不重乘 alpha、不猜域，字形长什么样由那颗源负责。
+pub struct Raster {
+    pub dx: i64,
+    pub dy: i64,
+    pub image: Rc<RgbaImage>,
+}
+
+/// 宿主给合成器的那颗**字形源**（M10.5「字形落像素」）。
+///
+/// 为什么是一棵树而不是"合成器自己引 `sisf-text`"：字体字节住在宿主那一侧（`crate::game::bundled_fonts`
+/// 那一颗 `FontBundle`，量宽度与画字形必须是同一张脸），而 `composite` 与 [`Source`] 一样**不问磁盘、
+/// 不引字体**。于是这一格与 `blt` 的源解析器同构：请求进来、像素回去，`None` = 这一串今天画不出
+/// （没有字体、或正文为空）⇒ 与"源读不到"同一档，那一格不落像素也不抛（上游那里也是透明）。
+pub trait TextRasterSource {
+    /// 一次字形光栅的请求；见 [`TextOp`] 与 [`Raster`]。
+    fn rasterize(&self, op: &TextOp<'_>) -> Option<Raster>;
+}
+
+/// 把 `ops` 里属于 `sid` 的那几条回放进 `canvas`（**不带字形源**的那一档 —— `fillText` 会回落到
+/// [`Report::not_yet`]，正是 M10.5「字形落像素」接上之前那条腿的读数；纯算术的夹具与判据走这里）。
+pub fn replay(sid: &str, ops: &[String], canvas: &mut Canvas, source: &Source) -> (Report, bool) {
+    replay_with_text(sid, ops, canvas, source, None)
+}
+
+/// [`replay`] 的正身：多接一颗可选的 [`TextRasterSource`]，有它就把 `fillText` 也画进那颗画布。
 ///
 /// **`size` 一律是"改尺寸 + 清空"** —— 上游的两条赋值腿（`_createCanvas` 的 `:758-765` 与逐字的
 /// `resize`）都是这个效果；至于"那张素材图的像素从哪来"，是 `BITMAP_HOST_JS::_createCanvas` 收尾
@@ -411,7 +519,14 @@ pub type Source<'a> = dyn Fn(&str, &str) -> Option<Rc<RgbaImage>> + 'a;
 ///
 /// 交回的第二个数是"这一段里见过 `size` 吗" —— 没见过就意味着这一颗位图**根本没有画布**，
 /// 调用方据此交回"没有源"而不是"一片空画布"（两种读数不能混）。
-pub fn replay(sid: &str, ops: &[String], canvas: &mut Canvas, source: &Source) -> (Report, bool) {
+#[allow(clippy::too_many_arguments)]
+pub fn replay_with_text(
+    sid: &str,
+    ops: &[String],
+    canvas: &mut Canvas,
+    source: &Source,
+    text: Option<&dyn TextRasterSource>,
+) -> (Report, bool) {
     let mut report = Report::default();
     let mut sized = false;
     for spec in ops {
@@ -542,6 +657,58 @@ pub fn replay(sid: &str, ops: &[String], canvas: &mut Canvas, source: &Source) -
                 }
                 disc(canvas, cx, cy, r, &rgba, blend == "source-over");
                 report.applied += 1;
+            }
+            Op::Text {
+                text: body,
+                x,
+                y,
+                max_width,
+                family,
+                size,
+                italic,
+                align,
+                baseline,
+                rgba,
+                blend,
+                ..
+            } => {
+                if !note_blend(&mut report, blend) {
+                    continue;
+                }
+                // 没有字形源 ⇒ 与 [`NOT_SYNTHESIZED`] 那一格同路：点名、一条像素都不落
+                // （正是 M10.5「字形落像素」接上之前那条腿的读数，宿主绑上源之后这一支才走下面）。
+                let Some(glyphs) = text else {
+                    Report::bump(&mut report.not_yet, "fillText");
+                    continue;
+                };
+                let spec = TextOp {
+                    sid,
+                    text: body,
+                    x,
+                    y,
+                    max_width,
+                    family,
+                    size,
+                    italic,
+                    align,
+                    baseline,
+                    rgba,
+                    blend,
+                };
+                // 源交 `None` = 这一串今天画不出（没有字体 / 正文为空）⇒ 与"源读不到"同一档：
+                // 那一格不落像素也不抛（上游那里画的也是透明），但**数进 `not_yet`** 让读数说话。
+                if let Some(r) = glyphs.rasterize(&spec) {
+                    blt_image(
+                        canvas,
+                        &r.image,
+                        x.round() as i64 + r.dx,
+                        y.round() as i64 + r.dy,
+                        blend == "source-over",
+                    );
+                    report.applied += 1;
+                } else {
+                    Report::bump(&mut report.not_yet, "fillText");
+                }
             }
             Op::NotYet { action, .. } => {
                 Report::bump(&mut report.not_yet, action);
@@ -738,6 +905,30 @@ fn blt(
     }
 }
 
+/// 一次**不缩放**的整图 `blt`（字形源交回的那一份预乘位图专用）。
+///
+/// 与 [`blt`] 的区别只有一处：字形位图已经在**逻辑像素那一档**（源按 `op.size` 光栅，与画布同一尺度），
+/// 所以这里没有源矩形/目标矩形、没有 nearest 采样，也不重乘 alpha —— 源已经是预乘的、颜色已经着好，
+/// 逐格 `out = src + dst×(1−srcA)` 落进画布即可。混合域与 [`blt`] 完全同一条腿（`over` = source-over，
+/// 否则 lighter 相加夹到 255）。
+fn blt_image(canvas: &mut Canvas, img: &RgbaImage, dx: i64, dy: i64, over: bool) {
+    for oy in 0..img.height as i64 {
+        for ox in 0..img.width as i64 {
+            let (px, py) = (dx + ox, dy + oy);
+            if px < 0 || py < 0 || px >= canvas.width as i64 || py >= canvas.height as i64 {
+                continue;
+            }
+            let s = img.pixel(ox as u32, oy as u32);
+            canvas.blend_at(
+                px as u32,
+                py as u32,
+                [s[0] as u32, s[1] as u32, s[2] as u32, s[3] as u32],
+                over,
+            );
+        }
+    }
+}
+
 #[cfg(all(test, feature = "js"))]
 mod tests {
     use super::*;
@@ -852,6 +1043,51 @@ mod tests {
                 "{action} 必须点名不回放，而不是静默落一格像素"
             );
         }
+        // 正文那一格（`fillText`）现在**认得下**：`shim_context.js` 的 `_text('fillText', …)` 交 14 格，
+        // 摊成 [`Op::Text`]（对齐/基线/斜体都留成字符串与旗标，落点计算住在字形源那一侧）。
+        assert_eq!(
+            parse(
+                "fillText|9|%E4%BD%A0|4|6|80|%E6%97%8F|28|1|center|alphabetic|255,255,255,200|1|source-over"
+            ),
+            Op::Text {
+                sid: "9",
+                text: "%E4%BD%A0",
+                x: 4.0,
+                y: 6.0,
+                max_width: 80.0,
+                family: "%E6%97%8F",
+                size: 28.0,
+                italic: true,
+                align: "center",
+                baseline: "alphabetic",
+                rgba: [255, 255, 255, 200],
+                blend: "source-over",
+            },
+            "`fillText` 落进 [`SYNTHESIZED`]：字段按 `_text` 的拼接逐格对表，正文/族名**不解码**"
+        );
+        // 缺参的 `maxWidth`（空串那一格）读成 0 = 不限宽，而不是坏形状。
+        assert_eq!(
+            parse("fillText|9|a|0|0||GameFont|28|0|start|alphabetic|0,0,0,255|1|source-over"),
+            Op::Text {
+                sid: "9",
+                text: "a",
+                x: 0.0,
+                y: 0.0,
+                max_width: 0.0,
+                family: "GameFont",
+                size: 28.0,
+                italic: false,
+                align: "start",
+                baseline: "alphabetic",
+                rgba: [0, 0, 0, 255],
+                blend: "source-over",
+            }
+        );
+        // 少一格的 `fillText` 是坏形状（字段数就是契约，与其余每一条同一条腿）。
+        assert_eq!(
+            parse("fillText|9|a|0|0||GameFont|28|0|start|alphabetic|0,0,0,255|1"),
+            Op::Bad
+        );
         assert_eq!(parse("mystery|7"), Op::Other("mystery"));
         // 少一格的坏形状 ⇒ 点名，不猜。
         assert_eq!(parse("fillRect|7|1|2|3|4|255,0,0,128"), Op::Bad);
@@ -960,6 +1196,9 @@ mod tests {
 
     #[test]
     fn anything_the_compositor_cannot_draw_is_named_and_counted() {
+        // 这一格走的是**没接字形源**的那一条 `replay`（第四参数之外没有 `TextRasterSource`）：
+        // `fillText` 与 `strokeText` 都回落到 `not_yet`。接上源之后 `fillText` 会落像素 —— 见下面
+        // `a_glyph_source_makes_fill_text_land_while_stroke_text_stays_named` 那一格。
         let mut canvas = Canvas::blank(2, 2);
         let ops = vec![
             "size|1|2|2|".to_string(),
@@ -979,6 +1218,59 @@ mod tests {
             [0, 0, 0, 0],
             "认不下的混合值一律不落像素"
         );
+    }
+
+    /// **接上字形源之后**（M10.5「字形落像素」那一半）：`fillText` 落的正是那颗源交回的预乘位图
+    /// （一次不缩放的 `blt`，落点 = `锚点 x/y + 源给的 dx/dy`），而 `strokeText` 照旧点名。
+    /// 这一格钉的是"合成器自己不认字体，只把请求交给源"——桩源交一颗实心 2×2 的**已预乘**色块。
+    #[test]
+    fn a_glyph_source_makes_fill_text_land_while_stroke_text_stays_named() {
+        struct Stub;
+        impl TextRasterSource for Stub {
+            fn rasterize(&self, op: &TextOp<'_>) -> Option<Raster> {
+                // 正文为空 = "这一串今天画不出"（没字体那一档）⇒ 源交 None，合成器数进 `not_yet`。
+                if op.text.is_empty() {
+                    return None;
+                }
+                let a = op.rgba[3].min(255) as u8;
+                let mut px = Vec::with_capacity(4 * 2 * 2);
+                for _ in 0..4 {
+                    px.extend_from_slice(&[200, 100, 50, a]);
+                }
+                Some(Raster {
+                    dx: 0,
+                    dy: 0,
+                    image: Rc::new(RgbaImage::new(2, 2, px)),
+                })
+            }
+        }
+        let mut canvas = Canvas::blank(4, 4);
+        let ops = vec![
+            "size|1|4|4|".to_string(),
+            "fillText|1|%E4%BD%A0|1|2||GameFont|28|0|start|alphabetic|255,255,255,200|1|source-over"
+                .to_string(),
+            "strokeText|1|x|0|0||GameFont|28|0|start|alphabetic|0,0,0,255|3|source-over".to_string(),
+        ];
+        let (report, _) = replay_with_text("1", &ops, &mut canvas, &none_source(), Some(&Stub));
+        assert_eq!(report.applied, 2, "size + 一条 fillText（描边不落）");
+        let names: Vec<&str> = report.not_yet.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(names, ["strokeText"], "正文落进像素之后，只剩描边在点名");
+        // 落点 = `(x=1 + dx=0, y=2 + dy=0)` 起的一颗 2×2，颜色就是源交的那一份（合成器不重乘 alpha）。
+        assert_eq!(canvas.pixel(1, 2), [200, 100, 50, 200]);
+        assert_eq!(canvas.pixel(2, 3), [200, 100, 50, 200]);
+        assert_eq!(canvas.pixel(0, 0), [0, 0, 0, 0], "字外那一格没被动过");
+
+        // 源交 `None`（正文为空）⇒ 回落成点名，一条像素都不落 —— 与"源读不到"同一档。
+        let mut empty = Canvas::blank(4, 4);
+        let empty_ops = vec![
+            "size|1|4|4|".to_string(),
+            "fillText|1||1|2||GameFont|28|0|start|alphabetic|255,255,255,200|1|source-over"
+                .to_string(),
+        ];
+        let (report, _) =
+            replay_with_text("1", &empty_ops, &mut empty, &none_source(), Some(&Stub));
+        assert_eq!(report.applied, 1, "只有 size 落了");
+        assert_eq!(report.not_yet, [("fillText".to_string(), 1)]);
     }
 
     /// **渐变落在预乘字节域、按像素中心插值**（第二小格第一档）。

@@ -32,7 +32,7 @@
 //!
 //! ## transport 的两条改判（都在上游的同一格上动刀，逐条写下为什么）
 //!
-//! 上游 [`DataManager.loadDataFile`]（`rpg_managers.js:78-94`）是 `XMLHttpRequest`：新边界里没有 DOM，
+//! 上游 `DataManager.loadDataFile`（`rpg_managers.js:78-94`）是 `XMLHttpRequest`：新边界里没有 DOM，
 //! 字节由宿主从 [`sisf_asset::Vfs`] 给（`mv_provider::MvAssets` 那一族：加密名映射 + 明文回退 + 内存解密）。
 //!
 //! 1. **读是同步的**。上游 `onload` 排到下一 tick，所以 `isDatabaseLoaded()` 会先假后真；这里同一句里
@@ -65,7 +65,7 @@ pub const READ_TEXT_GLOBAL: &str = "__sisf_read_text";
 /// `extToEncryptExt`/`readEncryptionkey` 逐字照抄，而 `decryptImg`/`decryptHTML5Audio`/
 /// `cutArrayHeader`/`decryptArrayBuffer`/`createBlobUrl` 那五条**不交**：它们是 XHR + `ArrayBuffer` +
 /// `Blob` + `<img src>` 那一族（`:9173-9250`），新边界里解密发生在 Rust 的
-/// [`crate::decrypt`]（同一把钥匙、同一个 16 字节头，M0.3 起有真素材判据），像素落在 `Bitmap` 上是
+/// [`mod@crate::decrypt`]（同一把钥匙、同一个 16 字节头，M0.3 起有真素材判据），像素落在 `Bitmap` 上是
 /// M10.4 的事。**密钥从 `$dataSystem.encryptionKey` 读**（`readEncryptionkey`，`:9262`）⇒ 兼容层
 /// 一个字节都不带它（`sisf_pray/src/key.rs::key_never_hardcoded` 现在扫两个仓库钉这一格）。
 pub const DECRYPTER_JS: &str = r#"
@@ -974,6 +974,31 @@ pub const MANAGERS_AUDIO_JS: &str = include_str!("js/managers_audio.js");
 /// 是一整颗数据形状，所以它既不进格数、也不进构造体那一档（`M10.md` 事实 63 那条纪律的另一面）。
 pub const LZ_STRING_JS: &str = include_str!("js/lib_lz_string.js");
 
+/// `StorageManager` 的**写侧那一族**（`rpg_managers.js:571-782` 的 24 条函数型静态，逐字切片）。
+/// `isLocalMode()` = `Utils.isNwjs()` 恒 `false` ⇒ 活的是 webStorage 那一支（踩 `localStorage`），
+/// `require('fs')` 那几支只在死支里被解析、不被求值 ⇒ 整段逐字交出。落法见文件头。
+pub const STORAGE_MANAGER_JS: &str = include_str!("js/managers_storage.js");
+
+/// `DataManager` 的存档那一族（`rpg_managers.js:216-457` 去掉 `setupBattleTest`/`setupEventTest`
+/// 那两颗非目标的 19 格，逐字）。交完这一段，交付边界上唯一那格真欠 `isAnySavefileExists` 自己通了。
+pub const MANAGERS_SAVE_JS: &str = include_str!("js/managers_save.js");
+
+/// 那颗**自创的 `localStorage`**（`src/js/shim_storage.js`，`SHIM_BASE` 双向数着，不与上游对表）。
+/// `StorageManager` 的活支踩它，它脚下踩本模块 `install` 绑上来的三格 `__sisf_store_*`。
+pub const STORAGE_SHIM_JS: &str = include_str!("js/shim_storage.js");
+
+/// 存档落盘那一侧的三根 transport（`localStorage` 的替身踩的就是它们）。crate 的 `install` 先把它们
+/// 绑到一颗**进程内 `HashMap`**（wasm 共享 realm 只用它 ⇒ fixture 判 save→load 往返，不碰磁盘）；
+/// `pray` 侧的 `src/compat_save.rs` 在 native 真流上把这三格**换绑**成 `saves/*.rpgsave` 的磁盘读写
+/// （与 `__sisf_paint`/`__sisf_measure_text` 同一条"宿主换绑"的腿）。key 与 value 挤在一根 `bind_str`
+/// 上，用 `\u0001` 分隔（base64 字母表里没有控制字符）。
+pub const STORE_GET_GLOBAL: &str = "__sisf_store_get";
+pub const STORE_SET_GLOBAL: &str = "__sisf_store_set";
+pub const STORE_REMOVE_GLOBAL: &str = "__sisf_store_remove";
+
+/// `install` 默认那颗内存 store 的键值分隔符（`localStorage.setItem` 把 key/value 拼成一根串送进来）。
+const STORE_SEP: char = '\u{1}';
+
 /// 装上 managers 的数据那一半。`vfs` 是宿主的那一份只读来源（native 磁盘 / 浏览器清单）。
 ///
 /// 顺序要求在 [`crate::platform::install`] **之后**（`DataManager.isBattleTest` 读 `Utils.isOptionValid`，
@@ -990,6 +1015,33 @@ pub const LZ_STRING_JS: &str = include_str!("js/lib_lz_string.js");
 pub fn install(host: &Host, vfs: Rc<Vfs>) -> Result<(), String> {
     let source = Rc::clone(&vfs);
     host.bind_str(READ_TEXT_GLOBAL, move |path| read_text(&source, &path))?;
+    // 存档落盘那一侧的三根 transport，默认绑到一颗**进程内 `HashMap`**（`localStorage` 的替身踩它们）。
+    // crate 不许知道某一款游戏把档存到哪个目录 ⇒ 磁盘那一手是 `pray` 侧 `compat_save.rs` 换绑的事；
+    // 这里那颗内存 sink 只保证本 crate 的 fixture 能独立跑一轮 `save → load`（wasm 共享 realm 同一条腿）。
+    let store: Rc<std::cell::RefCell<std::collections::HashMap<String, String>>> =
+        Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
+    {
+        let s = Rc::clone(&store);
+        host.bind_str(STORE_GET_GLOBAL, move |key| {
+            s.borrow().get(&key).cloned().unwrap_or_default()
+        })?;
+    }
+    {
+        let s = Rc::clone(&store);
+        host.bind_str(STORE_SET_GLOBAL, move |kv| {
+            if let Some((k, v)) = kv.split_once(STORE_SEP) {
+                s.borrow_mut().insert(k.to_string(), v.to_string());
+            }
+            String::new()
+        })?;
+    }
+    {
+        let s = Rc::clone(&store);
+        host.bind_str(STORE_REMOVE_GLOBAL, move |key| {
+            s.borrow_mut().remove(&key);
+            String::new()
+        })?;
+    }
     crate::core::install_cache(host)?;
     // **`JsonEx` 也在这一档自己装**，不等调用方先跑 [`crate::core::install`]：本族要它的是
     // `DataManager.saveGame`/`loadGame` 那两句（`rpg_managers.js:371`/`:388`），
@@ -1004,8 +1056,15 @@ pub fn install(host: &Host, vfs: Rc<Vfs>) -> Result<(), String> {
     crate::core::install_bitmap(host, Rc::clone(&vfs))?;
     for text in [
         // 库那一族排在最前：它是**一颗 `var`**，后面每一段都可能喊它（今天喊它的是
-        // `StorageManager`/`DataManager` 的存档那一句，还没交）。
+        // `StorageManager`/`DataManager` 的存档那一句）。
         LZ_STRING_JS,
+        // 存档写侧那一族（任务 #9）：`localStorage` 的替身 → `StorageManager`（24 条函数型静态，
+        // 活支踩上面那颗 `localStorage`）→ `DataManager` 的存档一族（踩刚交的 `StorageManager`）。
+        // 三段的体只在**运行期**才喊外物 ⇒ 装载期彼此顺序只是可读性，但 `StorageManager` 的静态类
+        // 形状与 `localStorage` 那颗对象必须在它们被喊之前在场（形状由 shapes、对象由这颗 shim）。
+        STORAGE_SHIM_JS,
+        STORAGE_MANAGER_JS,
+        MANAGERS_SAVE_JS,
         DECRYPTER_JS,
         RESOURCE_HANDLER_LOADER_JS,
         DATA_MANAGER_JS,
@@ -1048,6 +1107,11 @@ mod tests {
         "DataManager",
         "TextManager",
         "ImageManager",
+        // 任务 #9（存档写侧）：`StorageManager` 的 24 格静态挂在它的静态类形状上（上游
+        // `function StorageManager(){ throw new Error('This is a static class') }` ⇒ 一颗静态类壳）。
+        // **同一课第四次**：`managers::install` 现在自己 eval `managers_storage.js`，fixture 不点名
+        // 就是 `StorageManager is not defined`，本族判据一起红。
+        "StorageManager",
         "Utils",
         "Scene_Boot",
         "Graphics",
@@ -2171,6 +2235,45 @@ out.join('|')
             host.eval_string("[String(typeof AudioManager.playBgm), String(typeof WebAudio.prototype._load), String(WebAudio._standAlone)].join('|')"),
             "function|function|false",
             "少一格就是 `Game_Interpreter` 的 `241`/`250` 那一族在兼容腿上 `not a function`"
+        );
+    }
+
+    /// 任务 #9（存档写侧）：crate 默认那颗内存 sink 上，`StorageManager` 的 webStorage 那一支 +
+    /// `DataManager` 的存档一族**一整轮跑通** —— 编解码（`LZString` 压/解）在**上游文本自己**里跑，
+    /// crate 一行算术都不写。钉四格，全是"少交一格就 `not a function`"或"落点写反"的那一种：
+    /// ⑴ `isLocalMode()` = `Utils.isNwjs()` 恒 `false` ⇒ 走的是 webStorage 那一支（不是 fs 死支）；
+    /// ⑵ 一份真 payload `save → load` 逐字回原（压/解 + 那颗 `localStorage` 三格方法都对得上）；
+    /// ⑶ `exists` 立的起来、`isAnySavefileExists` **不再抛**（此前交付边界上唯一那格真欠 `†0` 就是它）；
+    /// ⑷ `saveGlobalInfo`/`loadGlobalInfo` 那一颗存档点（`savefileId` 0）读回来的是同一个对象。
+    #[test]
+    fn the_save_write_side_round_trips_through_the_default_store() {
+        let host = booted_default();
+        let probe = r#"
+            var out = [];
+            out.push(typeof StorageManager.save);
+            out.push(typeof DataManager.isAnySavefileExists);
+            // 空的这颗 sink：load(0) 读不到 → loadGlobalInfo 交回 [] → isAnySavefileExists 是 false，
+            // **而不是抛** —— 这一格就是任务 #9 销掉的那一欠。
+            out.push(String(DataManager.isAnySavefileExists()));
+            out.push(String(StorageManager.isLocalMode()));
+            var payload = JSON.stringify({ hello: '世界', n: 42, arr: [1, 2, 3] });
+            StorageManager.save(7, payload);
+            out.push(String(StorageManager.exists(7)));
+            out.push(String(StorageManager.load(7) === payload));
+            // 存档点那颗（savefileId 0 = 'RPG Global'）。
+            DataManager.saveGlobalInfo([{ title: '祈愿诗篇', globalId: 'RPGMV' }]);
+            var gi = DataManager.loadGlobalInfo();
+            out.push(gi[0].title + '/' + String(DataManager.isAnySavefileExists()));
+            out.join('|')
+        "#;
+        // 末那一格 `isAnySavefileExists` 是 **false**，而且这一格正是这条判据最该钉的东西：上游那句
+        // 循环是 `for (i = 1; i < globalInfo.length; i++)`，而 `saveGlobalInfo` 那颗 meta 落在**下标 0**
+        // （真正的存档槽是 `globalInfo[savefileId]`，savefileId ≥ 1）⇒ 光有 meta、没有存档槽时
+        // `isAnySavefileExists` 就该是 false。第一版把它写成 true 被这条判据当场抓回 ⇒ 落点没有反。
+        assert_eq!(
+            host.eval_string(probe),
+            "function|function|false|false|true|true|祈愿诗篇/false",
+            "存档写侧那一族的读数是上面这套（落点反 / 少一格 / 往返不等 都会在这里露形）"
         );
     }
 }

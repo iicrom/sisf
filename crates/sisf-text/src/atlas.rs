@@ -88,6 +88,34 @@ pub struct GlyphRect {
     pub scale: f32,
 }
 
+/// 一个字形的 **CPU 覆盖率读手**（[`FontAtlas::glyph_coverage`]）：装箱起点 + 整页借用 +
+/// 相对 pen 的左上角偏移。
+///
+/// 存在的理由只有一格：兼容层 `composite.rs` 的软件合成要在 **CPU** 里把字画进那颗位图
+/// （M10.5「字形落像素」），而它要的正是图集那一页影子缓冲里的**逐格覆盖率**。GPU 通路自己采样
+/// 纹理，从来不需要这个读手；CPU 里也没有第二份字形（`Page.cpu` 原本私有）—— 这一格就是把那份
+/// 唯一的真相**借出去读一次**，而不是另光栅一份（不留第二个真相）。
+///
+/// `data` 借自 `self`：调用方在下次动这颗图集之前用完。坐标换算只有一处容易错——装箱起点是
+/// **档内**像素、偏移 `left/top` 是**逻辑**像素，两者不同域，见各字段文档。
+#[derive(Debug)]
+pub struct GlyphCoverage<'a> {
+    /// 覆盖率位图宽/高（**档内**像素，= [`GlyphRect::size`]，除以 `scale` 才回逻辑像素）。
+    pub width: u32,
+    pub height: u32,
+    /// 整张覆盖率页（`stride*stride`，1 字节/格）。装箱起点由 [`Self::origin`] 给。
+    pub data: &'a [u8],
+    /// 行跨距（页边长，= 每页 `PAGE_EDGE` 格）：第 `row` 行第 `col` 格在 `data[(origin.1+row)*stride + origin.0+col]`。
+    pub stride: u32,
+    /// 覆盖率位图在页内的**左上角**（档内像素，= `uv0 × stride`）。
+    pub origin: [u32; 2],
+    /// 光栅档位（= [`GlyphRect::scale`]）：把位图尺寸折回逻辑像素要除以它。
+    pub scale: f32,
+    /// 相对 pen 的**左上角**偏移（**逻辑**像素，= [`GlyphRect::offset`]，y 已按"屏幕向下"翻好）。
+    pub left: f32,
+    pub top: f32,
+}
+
 /// 逻辑键 → raster 键，顺带取出被归零的 bin 余量（见 [`FontAtlas::set_raster_scale`]）。
 ///
 /// 只动 `font_size_bits` 与两个 bin，所以 `layout` 完全不用知道档位的存在：pen 位置
@@ -240,6 +268,37 @@ impl FontAtlas {
         let placed = self.rasterize(fonts, raster, scale, residue);
         self.glyphs.insert(raster, placed);
         placed
+    }
+
+    /// 取一个字形的 **CPU 覆盖率字节**（见 [`GlyphCoverage`]）——光栅、装箱、负缓存与
+    /// [`Self::glyph`] **同一条腿**（先调 `glyph` 落位，再按它的 uv 回手读那一页的影子缓冲）。
+    ///
+    /// 交 `None` 与 `glyph` 完全同义（空格 / 无面积 / 本页不支持其内容格式）。这是引擎请求
+    /// 清单第 15 条那一格：兼容层的软件合成要在 CPU 里把字画进位图，需要的就是这份唯一的覆盖率。
+    pub fn glyph_coverage(
+        &mut self,
+        fonts: &mut FontSystem,
+        key: CacheKey,
+    ) -> Option<GlyphCoverage<'_>> {
+        let rect = self.glyph(fonts, key)?;
+        let page = self.pages.iter().position(|p| p.epoch == rect.epoch)?;
+        let stride = PAGE_EDGE;
+        // uv 是按 `PAGE_EDGE` 归一的浮点；回手取整数装箱位（`rasterize` 里 `x/y` 本就是整数）。
+        let (ox, oy) = (
+            (rect.uv0[0] * stride as f32).round() as u32,
+            (rect.uv0[1] * stride as f32).round() as u32,
+        );
+        let data = &self.pages[page].cpu;
+        Some(GlyphCoverage {
+            width: rect.size[0],
+            height: rect.size[1],
+            data,
+            stride,
+            origin: [ox, oy],
+            scale: rect.scale,
+            left: rect.offset[0],
+            top: rect.offset[1],
+        })
     }
 
     /// 建页纹理、登记 epoch、上传脏页。**每帧在 `end_frame` 之前调一次**。
@@ -479,6 +538,50 @@ mod tests {
             hist[1] + hist[2] > 0,
             "24px 的 'A' 边缘该有过渡像素: {hist:?}"
         );
+    }
+
+    /// 覆盖率读手交回的落点必须与 `glyph` 那颗矩形**同一次装箱**（不是另光栅一遍）：尺寸相等、
+    /// `origin = uv × 页边长`、`scale/left/top` 一并照搬，且读到的字节里有实心格。
+    /// 这一格钉的是 CPU 合成通路取字形的正确性（兼容层 `composite.rs` 靠它把字画进位图）。
+    #[test]
+    fn glyph_coverage_reads_the_same_placed_rect_as_glyph() {
+        let mut bundle = FontBundle::from_bytes(INTER);
+        let mut atlas = FontAtlas::new();
+        let k = keys(&mut bundle, "A", 24.0)[0];
+        // 先拿一次 `glyph`（返回 `Copy` 的矩形，借用当场结束）。
+        let rect = atlas.glyph(bundle.fonts(), k).expect("'A' 有覆盖率");
+        // 再拿读手：装箱早已完成 ⇒ 落点必须与那颗矩形同一次装箱。
+        let max = {
+            let cov = atlas
+                .glyph_coverage(bundle.fonts(), k)
+                .expect("'A' 有覆盖率");
+            let edge = PAGE_EDGE as usize;
+            assert_eq!([cov.width, cov.height], rect.size, "读手的尺寸与矩形不符");
+            assert_eq!(cov.scale, rect.scale);
+            assert_eq!(
+                cov.origin,
+                [
+                    (rect.uv0[0] * edge as f32).round() as u32,
+                    (rect.uv0[1] * edge as f32).round() as u32,
+                ],
+                "装箱起点必须等于 uv × 页边长"
+            );
+            // 逐格读到实心覆盖（非零），证明借的是那一页的真字节而不是空表。
+            let mut max = 0u8;
+            for row in 0..cov.height as usize {
+                for col in 0..cov.width as usize {
+                    let i = (cov.origin[1] as usize + row) * cov.stride as usize
+                        + cov.origin[0] as usize
+                        + col;
+                    max = max.max(cov.data[i]);
+                }
+            }
+            max
+            // `cov` 在这里 drop ⇒ 下面才能再不可变借 `atlas`。
+        };
+        // `cached` 仍是 1：`glyph_coverage` 复用了 `glyph` 的落位，没有第二次光栅。
+        assert_eq!(atlas.cached(), 1, "取覆盖率不该多光栅一份");
+        assert!(max > 200, "读到的覆盖率里没有实心格：{max}");
     }
 
     /// 没有面积的字形（空格）走负缓存：`cached` 只长一次，且不会占页。

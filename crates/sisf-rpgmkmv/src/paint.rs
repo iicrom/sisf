@@ -1,6 +1,6 @@
 //! **画的那一条腿的契约**（M10.5 第四格第二小格，2026-10-05）。
 //!
-//! [`crate::js::shim_context`]（`src/js/shim_context.js`）那一层把 MV 的每一笔画**当场**兑现成
+//! `shim_context`（`src/js/shim_context.js`）那一层把 MV 的每一笔画**当场**兑现成
 //! 一条具名操作，交到这里；这里今天交的实现是**记录器**。为什么不画：
 //! `&mut Renderer` 只在 `App::draw` 那一拍借得到（`crates/sisf-app/src/app.rs:36` 的
 //! `trait App { fn draw(&mut self, alpha, renderer: &mut Renderer); }` 是引擎唯一的公开把手，
@@ -77,6 +77,10 @@ pub struct Recorder {
     evictions: RefCell<u32>,
     /// 落进像素的操作条数（合成的总账）。
     applied: RefCell<u32>,
+    /// 宿主换上的**字形源**（[`Recorder::set_text_source`]，M10.5「字形落像素」）：接上之前
+    /// `fillText` 与 [`crate::composite::NOT_SYNTHESIZED`] 同路点名，接上之后它落进合成像素。
+    /// 字体字节住在宿主那一侧（`bundled_fonts`），所以这一格只能注入、不能在 crate 里自己引字体。
+    text_source: RefCell<Option<Rc<dyn crate::composite::TextRasterSource>>>,
 }
 
 impl Recorder {
@@ -92,7 +96,23 @@ impl Recorder {
             refused: RefCell::new(0),
             evictions: RefCell::new(0),
             applied: RefCell::new(0),
+            text_source: RefCell::new(None),
         })
+    }
+
+    /// 换上宿主的**字形源**（[`crate::composite::TextRasterSource`]，M10.5「字形落像素」）。
+    ///
+    /// 装载那一侧在字体（`bundled_fonts` 那颗 `FontBundle`）就绪之后调它，之后每一次合成读到
+    /// `fillText` 都会把请求交给这颗源、把结果（已着色的预乘位图）落进那颗画布。换绑是**可重入的**
+    /// （判据与宿主都可能在同一颗 `Recorder` 上换），所以旧的直接被替换 —— 不留"两颗源"这种状态。
+    pub fn set_text_source(&self, source: Rc<dyn crate::composite::TextRasterSource>) {
+        *self.text_source.borrow_mut() = Some(source);
+    }
+
+    /// 今天有没有字形源（宿主那颗上屏桥 `CompatPaint` 据此决定 `fillText` 该不该点名为
+    /// "上不了屏"—— 没源时它是缺口、有源时它已落地）。
+    pub fn has_text_source(&self) -> bool {
+        self.text_source.borrow().is_some()
     }
 
     /// 记一条操作。返回值今天没人读（宿主换成真绘制之后它就是要回答的那一句），
@@ -222,7 +242,14 @@ impl Recorder {
             }
             self.ensure(src_sid, &decoded)
         };
-        composite::replay(sid, ops, canvas, &source)
+        // 字形源那一条借用是**共享读**：`RefCell::borrow` 允许并发只读，所以哪怕 `blt` 递归回
+        // `ensure` 再次进这一格、再 `borrow()` 一次也不撞（撞的只有 `borrow_mut`）。而源本身
+        // （宿主的 `CompatText`）每次 `rasterize` 都自成一格借它的 `TextEngine`，与这颗画布的借用无关。
+        let text_guard = self.text_source.borrow();
+        let glyphs = text_guard
+            .as_ref()
+            .map(|rc| &**rc as &dyn crate::composite::TextRasterSource);
+        composite::replay_with_text(sid, ops, canvas, &source, glyphs)
     }
 
     /// **显示那一侧读像素的把手**：把这一颗粒画布的账补到当前，并交出它的全部像素。

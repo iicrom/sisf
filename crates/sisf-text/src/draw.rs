@@ -18,9 +18,9 @@
 
 use sisf_render::{BatchKey, Blend, Instance, NO_CLIP, Renderer, Rgba};
 
-use crate::atlas::{FontAtlas, GlyphRect};
+use crate::atlas::{FontAtlas, GlyphCoverage, GlyphRect};
 use crate::bundle::FontBundle;
-use crate::layout::{PlacedGlyph, TextRun, TextStyle, layout_with};
+use crate::layout::{GlyphKey, PlacedGlyph, TextRun, TextStyle, layout_with};
 
 /// 字体包 + 覆盖率图集 + 提交，三件事的门面。
 pub struct TextEngine {
@@ -68,6 +68,15 @@ impl TextEngine {
     /// 排版（纯 CPU；结果与设备无关，所以每帧重排也不是错事）。
     pub fn layout(&mut self, text: &str, style: &TextStyle) -> TextRun {
         layout_with(self.bundle.fonts(), text, style)
+    }
+
+    /// 取一个字形的 **CPU 覆盖率**（[`FontAtlas::glyph_coverage`] 的转发，见该文档）。
+    ///
+    /// 这是引擎请求清单第 15 条那一格：兼容层 `composite.rs` 的软件合成要在 CPU 里把字画进那颗
+    /// 位图，需要的正是图集那一页 `R8` 覆盖率这一份唯一的真相 —— 不是另光栅一份。`run` 里排好的
+    /// [`GlyphKey`] 直接给它即可，装箱/负缓存与 GPU 那条 quad 通路共用同一颗 `FontAtlas`。
+    pub fn glyph_coverage(&mut self, key: GlyphKey) -> Option<GlyphCoverage<'_>> {
+        self.atlas.glyph_coverage(self.bundle.fonts(), key.cache())
     }
 
     /// 给新落位的覆盖率页建纹理并注册进渲染器。**每帧在 `end_frame`/`end_draw` 之前调**。
