@@ -227,7 +227,7 @@ wasm 的三条硬约束（不是空实现，是平台事实）：
 | 左/中/右对齐、垂直居中 | ✅ | 对齐在绘制期按 `TextLine::width` 现算，不交给 `set_text` |
 | 彩色字形（CBDT/COLR）、亚像素覆盖 | ❌ 显式跳过 + 告警一次 | 塞进 R8 页会画出错色，不放空实现 |
 | 字形驱逐 / 字号变化后的页回收 | ❌ | 见 `atlas.rs` 模块头；游戏字号只有几档，页满则跳字 |
-| RT 的 CPU 读回（`Bitmap#getpixel`） | ❌ | T7/RGSS 兼容层要用时再加，本阶段只有 GPU 侧 |
+| RT 的 CPU 读回（位图渲染目标的像素回 CPU） | ❌ | 仍然只有 GPU 侧。兼容层那两格 `Bitmap.getPixel`/`getAlphaPixel` **不走这条路**：它们读的是解码镜像与操作流回放（`crates/sisf-rpgmkmv/src/raster.rs` 的 `Rasters::pixel` + `composite::replay`/`replay_with_text`），而 `fillText` 要的**字形覆盖率**走新增的 `FontAtlas::glyph_coverage`（`atlas.rs`，把图集页那份唯一的 CPU 影子缓冲借出去读一次，不另光栅一份）|
 | 会话嵌套（往 RT 上画时再开一个 RT 会话） | ❌ 报错 | 需要嵌套 render pass，`PaintError::AlreadyDrawing` |
 
 ## 验收与闸门

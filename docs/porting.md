@@ -1,9 +1,16 @@
 # 从 RPG Maker 移植
 
-先划清状态：`crates/sisf-rpgmk` 已经实装了 MV 工程的**读入侧**（§8）—— `data/*.json` 的
-宽松反序列化、事件码表 → `Command` 的翻译、三张 `Game_*` 表、最小 `Scene_Map`、`.zip` 工程包
-provider（§9）。这篇文档 T12 起草时它们还只是计划，所以 §1/§2 的状态列已经按 T11 的实际
-形状改过。仍然没有的是 UI 控件层与解密（各自标了 ❌ / 待建）。
+先划清状态：MV 工程在本仓库里有**两条线**，它们共用引擎、互不依赖。
+
+- **翻译期：`crates/sisf-rpgmk`**（T11，§8）—— `data/*.json` 的宽松反序列化、事件码表 → `Command`
+  的翻译、三张 `Game_*` 表、最小 `Scene_Map`、`.zip` 工程包 provider（§9）。不跑 JS，只把 MV 的
+  指令树折成引擎自己的 `Command`。
+- **运行期：`crates/sisf-rpgmkmv`**（M 系列，§11）—— 顶替整套 `rpg_*.js` 的 JS 兼容层：读真素材、
+  解 MV 的加密头、把上游文本逐字交给浏览器/QuickJS 跑。`Window_*`/`Scene_*`/`Game_*` 那些对象在
+  **这一条腿上是逐字交出的 JS**，不是引擎 API —— 所以 §1 那张表的右列只说引擎侧的落点。
+
+这篇文档 T12 起草时上面两条都还只是计划，所以 §1/§2 的状态列已经按实际形状改过。
+仍然没有的只剩**引擎侧的 UI 控件层**（❌，理由见原处）与 **RGSSAD/RGSS2A 容器**（待建，§9.2）。
 所以这篇文档是**接口地图 + 语义差清单**，不是"照抄就能跑"的流程。这里写到的每个引擎名字
 都能在 `crates/` 里 grep 到；标 ⏸ 的是没实现的，标 ❌ 的是**定案不做**的（原因写在原处，
 不在这里重复），标"待建"的是 §9 那张插槽清单。
@@ -22,7 +29,7 @@ provider（§9）。这篇文档 T12 起草时它们还只是计划，所以 §1
 | `Audio.bgm/bgs/me/se_play` | `SoundChannel::{Bgm,Bgs,Me,Se}` + `AudioBus::play_bytes`；事件侧走 `AudioPort` | ✅ |
 | `Input.repeat?/trigger?` | `EngineBus` → `ActionMap`（命名动作）→ `InputState` 的 Press/Hold/Release 边沿 | ✅ |
 | `Interpreter` | `EventRunner`：`EventDef::from_ron → compile() → EventScript → start/tick(… , budget)` | ✅ |
-| `Window` / `FileWindow` / 消息窗 | 只有 `UiPort::{show(Prompt),hide,set_dim}` 这三个把手；窗口控件本身 ❌ 不做 —— 菜单/商店/窗口皮肤和战斗一样属于游戏侧 FSM（`examples/rpg_demo.rs` 那条路） | ❌ |
+| `Window` / `FileWindow` / 消息窗 | 引擎侧只有 `UiPort::{show(Prompt),hide,set_dim}` 这三个把手；窗口控件本身 ❌ 不做 —— 菜单/商店/窗口皮肤和战斗一样属于游戏侧 FSM（`examples/rpg_demo.rs` 那条路）。**但兼容层逐字交出了上游那十二颗 `Window_*`**（§11，它们是 JS，不是引擎 API） | ❌（引擎）/ 兼容层已交 |
 | `Game_Map` / 换图 / 事件页条件 | ✅ T11：`Scene_Map`（`enter` → `refresh` → `tick`）+ `MapDef`/`TilesetDef`/`PageCondition::meets`；换图与场景栈仍归宿主（`examples/rpgmv_shell.rs` 的写法） | ✅ |
 | `Font`（`System.font_name`） | `sisf_text::FontBundle::from_bytes` / `register_bytes`，**字体文件由宿主提供**（§5） | ⚠️ |
 
@@ -101,8 +108,9 @@ RGSS 的 `Sprite#blend_type` 有 0 正常 / 1 加法 / 2 乘算（/5 屏幕）�
   （`SoundBank::from_sf2(&[u8])`，字节建议经 `Vfs`）。没有 SF2 ⇒ `MissingSoundBank` 报错 + 提示，
   不 panic。离线退路（`fluidsynth` 预渲染成带 LOOP 元数据的 `.ogg`）写在 `docs/audio.md`。
 - **素材容器与解密**：**明文 `.zip` 工程包已经能做**（`archive` feature，native，见 §9）；
-  RGSSAD（XP/VX 打包）、RGSS2A/OGGVrypt 的 `.ogg`、MV/MZ 的加密素材仍是**待建**，
-  接口骨架在 §9。密钥归项目，引擎永远不猜。
+  **MV 的素材加密也已做**（`.rpgmvp`/`.rpgmvo`/`.rpgmvm`，兼容层那一腿，见 §9.2 与 §11）。
+  RGSSAD（XP/VX 打包）与 RGSS2A/OGGVrypt 的 `.ogg` 仍是**待建**，接口骨架在 §9。
+  密钥归项目，引擎永远不猜：兼容层那份是从 `data/System.json` 的 `encryptionKey` 读出来的。
 
 ## 6. 会咬人的语义差
 
@@ -222,16 +230,23 @@ vfs.register(Box::new(zip));                                  // 之后 data/Map
   `archive` feature 在 wasm32 是显式空转（模块被 `cfg` 挡掉，`cargo xtask check-all` 会跑到这条腿）。
   浏览器的正确做法是宿主 JS 解压后把字节喂 `MemoryProvider` / `WebManifest`，见 `docs/platforms.md`。
 
-### 9.2 待建：三种加密容器
+### 9.2 已实装一格、待建两格
 
-**都还没有实现**，也都没有现成 crate 可拉（crates.io 上没有一个能解 RGSSAD/RGSS2A/MV-MZ 素材加密的
+**已实装：MV 的素材加密**（`crates/sisf-rpgmkmv/src/decrypt.rs`，照上游 `Decrypter`）：磁盘上的
+`.rpgmvp/.rpgmvo/.rpgmvm` = 16 字节头 + 原文件，而**只有原文件的前 16 字节**与密钥逐位 XOR（上游循环的
+上界就是 `_headerlength`，后面一个字节都不动）。`is_encrypted` 认那 16 字节头而不是扩展名，头不符返回
+`None`（由调用方决定明文回退还是报错，不 panic、不静默原样返回）；`encrypted_ext` 就是上游
+`extToEncryptExt` 那三条映射。接它的 provider 是 `MvAssets`（逻辑名→加密名、明文回退、内存里解，
+绝不落明文镜像），密钥由 `key::from_system_json` 从 `data/System.json` 读出 —— 兼容层一个字节都不带它。
+
+**待建的两种 RGSS 容器**（RGSSAD/RGSS2A/RGSS3a 与 `.ogg` 的 RGSS2A/OGGVrypt 壳）都还没有实现，
+也都没有现成 crate 可拉（crates.io 上没有一个能解 RGSSAD/RGSS2A 素材加密的
 维护中包）；算法在 rpgmad-lib（Python，`rpgmad`）与 Luminol（Rust 编辑器，`game-sync`/`rpgmz` 模块）
 里各有一份可读的实现。每个约 200 行，纯字节操作，**不需要 `VfsProvider` trait 改动** ——
-骨架就长这样：
+骨架就长这样（MV 那一格已经验证了这套形状够用）：
 
 ```text
 pub struct RgssadProvider;              // .rgssad / .rgss2a / .rgss3a（XP/VX/VXA）
-pub struct MvCryptoProvider;            // MV/MZ 的加密素材（Graphics/*.rgss3a 之类）
 
 impl RgssadProvider {
     /// `password` = Game.exe 里的 4 字节 key（RGSS 用它做 XOR 流的种子）。
@@ -250,6 +265,7 @@ impl sisf_asset::VfsProvider for RgssadProvider {
 
 1. **密钥从哪来**：RGSS 的 key 在可执行文件里，MV/MZ 的 `EncryptionKey` 在 `Game.rgsspec`/
    `Game.ini` 旁边。引擎**不猜、不硬编码** ⇒ 只能作为构造参数由宿主传入（授权素材的密钥归项目）。
+   这一格在 MV 那一腿上已经兑现：`key::from_system_json` 交不出钥匙就报错，兼容层里没有默认密钥。
 2. **`.ogg` 的 RGSS2A/OGGVrypt 壳**：那是**素材文件级**的加密，不是容器级的，所以它不属于
    provider，而属于 `sisf-media` 的解码入口 —— 接法应是"解出明文字节后再交给解码器"。
    现在这类文件会走到音频解码失败并报错，不是静音。
@@ -329,3 +345,82 @@ native = rquickjs（quickjs-ng），wasm = 浏览器自带引擎（`js_sys::eval
 rquickjs）靠 feature/target 分开，不留空实现。
 
 [`MVState`]: crates/sisf-event/src/js/engine.rs
+
+## 11. 运行期兼容层：`sisf-rpgmkmv`（M 系列）
+
+它是本仓库第二颗 MV crate，**不进门面 `sisf`**（`crates/sisf/Cargo.toml` 里根本没有它）：
+宿主直接 `sisf-rpgmkmv = { path = "../sisf/crates/sisf-rpgmkmv", features = ["js"] }`。§1–§10 说的是
+"把 MV 折成引擎"，这一节说的是"让上游的 JS 原样跑" —— 两条线共用引擎但互不依赖。
+
+### 11.1 逐字切片 + 自创的底，两类文本
+
+`crates/sisf-rpgmkmv/src/js/` 下 40 份 JS 共 2.1 万行，**两类各有名单**：
+
+- **逐字切片**：`rpg_managers.js`/`rpg_core.js`/`rpg_objects.js`/`rpg_scenes.js`/`rpg_sprites.js`/
+  `rpg_windows.js` 里交出的那几格，**不改良、不顺手整理**（连尾逗号都照上游）。它们自己就是基准，
+  所以 native 与 wasm 两条腿跑同一份文本、拿同一个答案。
+- **自创的底**（`shim_*.js` 与那几颗宿主面）：不比上游，由移植侧的尺子 `objects-verbatim.py`
+  **双向数**（名单里多一格少一格都红）。在本仓库里拿肉眼判"这格算不算逐字"不算证据。
+
+模块地图（一句话一个，细节在各文件头）：[`shapes`](crates/sisf-rpgmkmv/src/shapes.rs) 从被顶替的源码
+算全局形状名单并生成跳板表（`scan`/`install_js`/`trampoline_js`，只能生成不许手抄）；
+[`jsrt`](crates/sisf-rpgmkmv/src/jsrt.rs) 是两条腿的宿主与对象模型闸门（`Host::bind_str` 那根"一字符串进、
+一字符串出"的接缝）；[`platform`](crates/sisf-rpgmkmv/src/platform.rs) 交平台件（`Utils`/`Input`/`TouchInput`/
+`console`/`window`，外加 QuickJS 不带 `RegExp.$1..$9` 那一族的补底 `REGEXP_CAPTURE_JS`）；
+[`managers`](crates/sisf-rpgmkmv/src/managers.rs) 交 managers 族（数据那一半 + 音频三圈 + 存档那一族，
+transport 是 `__sisf_read_text` 与 `__sisf_store_get/set/remove`）；[`objects`](crates/sisf-rpgmkmv/src/objects.rs)
+交 `Game_*` 四腿；[`core`](crates/sisf-rpgmkmv/src/core.rs) 交 `rpg_core.js` 那几格（`Graphics` 的屏幕读数、
+缓存四颗、`Bitmap` 三半）；[`scenes`](crates/sisf-rpgmkmv/src/scenes.rs)/[`sprites`](crates/sisf-rpgmkmv/src/sprites.rs)/
+[`windows`](crates/sisf-rpgmkmv/src/windows.rs) 那 4 + 10 + 12 颗上树；[`plugins`](crates/sisf-rpgmkmv/src/plugins.rs)
+读 `plugins.js` 注册表并逐插件交出装载账单（`Registry`/`install_manager`/`load`）；
+[`paint`](crates/sisf-rpgmkmv/src/paint.rs) 把画法录成一条具名操作（`Recorder` + 那八只 `__sisf_*` 把手，
+**全由宿主换绑**）；[`composite`](crates/sisf-rpgmkmv/src/composite.rs) 是 CPU 里那台软件合成器（`replay` 把操作流
+回放成像素）；[`raster`](crates/sisf-rpgmkmv/src/raster.rs) 交位图的解码镜像与预算（`Rasters`）。
+读盘那一侧仍是 [`mv_provider::MvAssets`](crates/sisf-rpgmkmv/src/mv_provider.rs)（逻辑名→加密名、明文回退、
+内存里解）与 [`key::from_system_json`](crates/sisf-rpgmkmv/src/key.rs)。
+
+### 11.2 文字在 CPU 里落像素（引擎侧只开了两只读手）
+
+上游 `Bitmap#fillText` 要的是一份**字形位图**，而 CPU 里没有第二份可拄：引擎那一份只住在
+覆盖率图集页里。所以 M10.5「字形落像素」开两只读手而不是另光栅一份：
+
+- [`FontAtlas::glyph_coverage`]（`crates/sisf-text/src/atlas.rs`）交 [`GlyphCoverage`] —— 那一页影子缓冲的
+  逐格覆盖率 + 装箱起点 + 行跨距 + 相对 pen 的偏移。**与 `glyph()` 同一条腿**（先落位再回手读），
+  所以光栅/装箱/负缓存的口径不会分叉。
+- [`composite::TextRasterSource`] 那颗**宿主字形源**由 [`paint::Recorder::set_text_source`] 换绑上（字体字节住在
+  宿主那一侧，crate 不许自己引字体）。没接上源时 `fillText` 照旧进 [`composite::Report::not_yet`] 点名，
+  接上之后它落进合成像素。**`strokeText` 仍然只点名不回放**（[`composite::NOT_SYNTHESIZED`]）—— 那是描边，
+  要它对覆盖率做膨胀再挖掉正文；拿"填一份正文"假装画对了描边比不做更糟。
+
+**屏幕这一侧不在本仓库证**：以上全在 CPU 与记录里，像素上屏要真的绘制会话（宿主那一侧）。
+
+### 11.3 闸门怎么盖到它（`check-all` 盖不到）
+
+| 命令 | 盖不盖得到 `sisf-rpgmkmv` | 本轮读数 |
+|---|---|---|
+| `cargo xtask check-all` | **盖不到** —— 四组全是 `-p sisf`，而门面不依赖它 | — |
+| `cargo xtask clippy` | 盖到（前两条腿是 `--workspace --all-targets [--all-features]`） | 四腿 0 warning |
+| `cargo test --workspace --all-features` | 盖到 | native 243 passed / 1 ignored |
+| `cargo xtask wasm-test` | 盖到，专用一条 `--features js,web` 腿 | wasm32 240 passed |
+
+两条腿的用例数差异（243 vs 240）不是回归：那几格是要真磁盘/真进程的判据，在 wasm32 上按定案不存。
+两边各自都钉的是"同一份 JS 文本在两颗引擎上给同一个答案"。
+
+### 11.4 `--target web` 那条腿上的 `eval`（只有浏览器会红）
+
+`js_sys::eval` 在 `wasm-bindgen --target web` 生成的 **ES module（默认 strict）** glue 里求值，
+而上游那一族构造体写的是**隐式全局**（`X = function () {}`，没有 `var`/`globalThis.`）⇒
+`ReferenceError: Sisf2DGradient is not defined`，兼容层装不上。native 腿（QuickJS）与 node（CommonJS）
+都是 sloppy ⇒ **六道闸门全绿也照不出来**。落法是 [`jsrt`](crates/sisf-rpgmkmv/src/jsrt.rs) 的
+`indirect_eval`（取 `globalThis` 上那颗 `eval` 做**间接调用**，ECMA-262：间接 eval 恒在全局 sloppy
+语境求值），而不是去改那批上游文本。
+
+### 11.5 还开着的那些
+
+- **引擎侧两处退役只记账未动手**：`sisf-event::js` 的 façade 与 `sisf-rpgmk::translate` 都保留着
+  （定案：给"不跑 JS 的工程"留路）。要动它们是上面六道闸门的事。
+- 代码里点名的下一格：`Html5Audio` 一族按定案不交、`ShaderTilemap` 的 GL 底不交（判据钉的是抛）、
+  `SceneManager.snap`/`onSceneCreate`/`onSceneStart`/`snapForBackground` 那几格是**宿主侧空体**，
+  以及 `core.rs`/`shim_display.js`/`shim_context.js` 里三处"交覆盖账点名"的记名。
+- **逐插件的覆盖账与旧路线退役住在移植侧**（`../sisf_pray/M10.md` 的 M10.6/M10.7），
+  本仓库只在 `todo.md` 末尾「M 系列补账」里记引擎侧那一面。

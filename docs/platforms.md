@@ -13,11 +13,11 @@
 ## 一条命令检查三端
 
 ```sh
-cargo xtask check-all     # 宿主 --all-features + wasm32 web + aarch64-linux-android native
-cargo xtask clippy        # -D warnings
-cargo test --workspace --all-features   # 纯逻辑 + GPU 读回（见下）
+cargo xtask check-all     # 四组：宿主 --all-features、wasm32 web、aarch64-linux-android native、wasm32 音频全开+移植层
+cargo xtask clippy        # 四条 -D warnings 腿：宿主 --all-targets、宿主 --all-features、wasm32 两条
+cargo test --workspace --all-features   # 纯逻辑 + GPU 读回；**非 Windows 要加 `-- --skip golden`**（见下）
 cargo xtask wasm-test     # 同一批纯逻辑测试跑在 wasm32 上（见"wasm 上的纯逻辑测试"）
-cargo xtask golden        # 离屏 golden 比对（仅 Windows，见 docs/bench.md）
+cargo xtask golden        # 离屏 golden 比对（真基线只在 Windows；macOS 上必红，见 docs/bench.md）
 ```
 
 ## 桌面
@@ -162,7 +162,7 @@ cargo xtask web tiled_map # 换示例：不带示例名时缺省只构建 hello_
 ## wasm 上的纯逻辑测试（T12）
 
 ```sh
-cargo xtask wasm-test              # 七条腿（sisf-app 占两条），合计 195 个用例（清单在 xtask 的 WASM_TESTS）
+cargo xtask wasm-test              # 十条腿（`sisf-app` 与 `sisf-event` 各占两条），合计 473 个用例（清单在 xtask 的 WASM_TESTS）
 cargo xtask wasm-test atlas        # 后面的参数原样透传给 harness（这里只跑名字含 atlas 的）
 ```
 
@@ -177,6 +177,13 @@ VFS 路径规范化、atlas 装箱、batch 排序、事件 VM、mixer 确定性 
 | `asset::store`、`asset::tasks` | `Harness::wait` 靠 `thread::sleep` 泵任务，wasm 没有线程也没有时钟 |
 | `text` | 启动要扫系统字体目录 |
 | `render::gpu_tests`、`atlas_gpu`、`bitmap`、两个 golden | 要真 adapter；wasm 上由浏览器手测覆盖 |
+
+最后一行里 `sisf-text/golden_text` 整个文件挂了 `#![cfg(windows)]`，而 `sisf-sprite/golden_sprite`
+**没有**挂 —— 所以它在非 Windows 上照样编译、找到真 adapter 并比对，而基线出自 Windows/RTX，于是它
+红在取整上（本轮 macOS 实测：`sprite_scene_golden` 单通道差 2 > TOL 1，位置 `(35,226)`）。
+**那是环境决定的红，不许 `--bless`**（会把 Windows 基线覆盖成 mac 输出、反过来弄坏 CI golden job）。
+同一格也因此把非 Windows 上的 `cargo test --workspace --all-features` 顶成 exit 101 ⇒ 要么带
+`-- --skip golden`，要么按红记账，别吞退出码。
 
 透传给 harness 的参数只有 libtest 那几个（filter、`--skip`、`--list`、`--exact`、`--nocapture`、
 `--format`）。`--quiet` 与 `--test-threads=1` 会被 `wasm-bindgen-test-runner` 直接判退出码 1（本机各验过一次），

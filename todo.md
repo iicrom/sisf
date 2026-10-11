@@ -691,6 +691,97 @@
 12. **`xtask wasm-test` 的每腿 feature 不一样，不能统一注入 `--no-default-features`，也不能统一注入 `--all-features`**：`sisf-audio` 那一腿刻意不带默认 feature，为的是"只跑纯 mixer 那半边"（两条 pump 各自带 `target_arch` 条件，见 T7 的记账），而 `sisf-render`/`sisf-sprite`/`sisf-event` 用默认就行 —— 所以表里第四列写的是"这条腿在测什么"、每腿自己带参数。统一注入某一种"更宽"或"更窄"的写法，症状都是某一腿静默少编译一半代码，而用例数照样好看。本轮为 `sisf-audio --no-default-features` 之外又加了一条 `--features web`（第 4 条那个 E0433）。**顺带撤回一条本轮自己写下的假事实**：记账时我写过"`--all-features` 在 wasm 上会挂（`wgpu` 编译失败：`no such command script 'web'` / `BindPipelines`）"，重跑时四条全绿 —— `cargo check --target wasm32-unknown-unknown --all-features` 分别加 `-p sisf-audio` / `-p sisf-render` / `-p sisf` / `--workspace` 都 exit 0，`cargo test -p sisf --target wasm32 --all-features --no-run` 也 exit 0（锁里的 wgpu 是 30.0.1，不是那句里的 29.0.1）。那句话**不成立**，已从 `docs/platforms.md` 删掉；留在账里是因为它记的是比"少一个事实"更糟的事：**只在一次输出里见过、重跑不复现的失败，不能当成事实写下来**（`grep -c` 读到 0 时先怀疑命令压根没跑）。这一轮真正确认过的只有两条：`cargo test -p sisf-app --target wasm32 --no-default-features` 编译不过（第 4 条），以及 `--quiet` / `--test-threads=1` 会被 `wasm-bindgen-test-runner` 判 exit 1（两条本轮各重跑一次）—— 所以能透传给 harness 的只有 filter / `--skip` / `--list` / `--exact` / `--nocapture` / `--format`。
 13. **`cargo doc` 从来没进过任何闸门，攒了 16 条警告**（DoD-2 说的是编译警告，rustdoc 的一条都不算）。本轮清零，形状记下来免得再攒：① intra-doc 链接指向 **private 项**（`DEVICE_POLL`、`OPEN_RETRY`、`MAX_PAGES`、`Hold`、`Batch::flush`、`EventRunner::hold_variant`、`GLOBAL`、`crate::runner`）—— 写成 `` `名字` `` 而不是链接；② 指向**只在另一端存在**的项（`pump_web`/`WasmTasks`/`WebManifest` 只在 wasm32 编出来，宿主文档解不到）—— 同上，并注明"只在 wasm32"；③ **链接文本与显式目标相同**（`[`X`](a::b::X)` 判 redundant，去掉目标即可）与 `fn layout`/`mod layout` 的歧义（要写 `[layout](mod@crate::layout)`）；④ 文档里裸写的 `[-1,1]`/`[0,1]` 会被当成链接解析（`unresolved link to '0,1'`）—— 区间要包进反引号。还顺手改了一条**真错链**：`command.rs` 写 `[`crate::vars::Expr`]`，而 `Expr` 就定义在 `command.rs` 自己身上。判据 = `cargo doc --no-deps --workspace --all-features` 输出里没有 `warning:`；本轮**没有**把它接进 CI/xtask（不新增闸门），下一轮要接就照这条判据写。
 
+## M 系列补账：`sisf-rpgmkmv`（MV 兼容层）在引擎侧的落点
+
+**这一族的逐格账不住在这里。** 路线、方向定案、M10.0–M10.7 的拆解与每一格的开工测量/验收读数，
+全在移植侧仓库的 `../sisf_pray/M10.md`（闸门命令与期望读数在 `../sisf_pray/docs/m10-gates.md`，尺子是
+`../sisf_pray/tools/probes/`，其中 `objects-verbatim.py` 双向数"逐字切片 / 自创 shim"两类名单）。
+本仓库代码注释里那 115 处 `M10.md` 引用的就是那一份，在这里解不到它。
+这一节只记三件引擎侧自己的事：**多了一颗 crate 之后账面上什么变了**、**引擎侧本轮交出哪三格**、
+**六道闸门的当前读数**。（写这一节的原因是 M10.0 之后的四个引擎侧提交一句账都没写回 `todo.md`。）
+
+- [x] 新增 `crates/sisf-rpgmkmv`（M10.0–M10.5，四个提交）：顶替整套 `rpg_*.js` 的运行期兼容层。
+  17 个模块 16,327 行（6 个常驻 + 11 个门在 `js` 后）+ `src/js/` 40 份 JS 20,808 行。**不进门面 `sisf`**（宿主直接依赖它），
+  feature 面是它自己的 `js`（native = `dep:rquickjs`，wasm = `dep:js-sys`+`dep:wasm-bindgen`，都 optional
+  且各自只在自己的 target 段）与 `web = ["sisf-asset/web"]`；`default = []` ⇒ 不带它时零影响。
+  验收 → `cargo xtask wasm-test` 多一条 `sisf-rpgmkmv --features js,web` 腿（本轮 240 条）；
+  `cargo test -p sisf-rpgmkmv --all-features` 本轮 **243 passed / 1 ignored**（被 ignore 的那条是
+  `jsrt::tests::the_rust_to_js_call_is_measured_per_beat`，它是测量不是断言）。两条腿用例数差 3 条是定案
+  （要真磁盘/真进程的那几格在 wasm32 上不存在），不是回归。
+- [x] 本轮在途那三格（原未提交，本节一并结账）：
+  ① **存档写侧**（`js/managers_storage.js` 24 格 + `js/managers_save.js` 19 格 + 自创的
+  `js/shim_storage.js`）—— crate 把 `__sisf_store_get/set/remove` 三根 transport 默认绑到一颗**进程内
+  `HashMap`**，磁盘那一手是宿主换绑的事（crate 不许知道某一款游戏把档存到哪个目录）；
+  判据 `managers::tests::the_save_write_side_round_trips_through_the_default_store`（读数钉成一条串：
+  `function|function|false|false|true|true|祈愿诗篇/false`）。② **字形落像素** —— 引擎侧新开一只
+  **CPU 覆盖率读手**：`sisf-text` 的 `FontAtlas::glyph_coverage` 与 `GlyphCoverage`（与 `glyph()` 同一条腿，
+  所以光栅/装箱/负缓存的口径不会分叉，也不另光栅一份），`sisf-rpgmkmv` 侧以 `composite::TextRasterSource`
+  + `paint::Recorder::set_text_source` 接上；判据 `atlas::tests::glyph_coverage_reads_the_same_placed_rect_as_glyph`
+  与 `composite::tests::a_glyph_source_makes_fill_text_land_while_stroke_text_stays_named`（没接源时 `fillText`
+  进 `Report::not_yet` 点名，`strokeText` 仍按定案只点名不回放）。③ **浏览器那条腿的 `eval`** ——
+  `jsrt.rs` 的 `indirect_eval`（取 `globalThis` 上那颗 `eval` 做间接调用），六处调用点全换。
+
+- 验收（整段，**2026-10-08 于 macOS arm64、rustc 1.101.0-nightly (c1070d693) 实跑**）：
+
+  | 命令 | 退出码 | 读数 |
+  |---|---|---|
+  | `cargo xtask fmt --check` | 0 | 净 |
+  | `cargo xtask clippy` | 0 | 四条腿（宿主 `--all-targets`、宿主 `--all-features`、wasm32 `web_features()`、wasm32 `web`）各 0 warning |
+  | `cargo xtask check-all` | 0 | 四组净；**注意它盖不到 `sisf-rpgmkmv`**（事实第 1 条） |
+  | `cargo test --workspace --all-features -- --skip golden` | 0 | **661 passed / 0 failed / 3 ignored**，32 条 `test result: ok` |
+  | `cargo test --workspace --all-features -- --skip gpu_tests --skip readback_clear --skip golden` | 0 | **653 passed**（这是 CI 的 ubuntu 腿口径，本轮新加的第三个 skip 见事实第 2 条） |
+  | `cargo xtask wasm-test` | 0 | **473 passed / 十条腿**：asset 5 · audio 19 · render 34 · sprite 51 · app 15 · app 10 · event 61 · event(js) 11 · rpgmk 27 · **rpgmkmv 240** |
+  | `cargo xtask golden` | **101** | `sprite_scene_golden`：最大单通道误差 **2 > TOL 1**，首处差异 `(35,226)` 基线 `[200,221,212,255]` vs 当前 `[198,221,212,255]` —— **环境决定的红，与 T11 续 事实 4 一字不差，不许 `--bless`**（红了意味着"拿的是 mac 的取整去比 Windows 基线"，不意味着本轮改动弄坏了像素） |
+  | `cargo test --doc -p sisf --all-features` | 0 | 1 passed（门面顶层示例） |
+  | `cargo doc --no-deps --workspace --all-features` | 0 | **本轮清掉 9 条 → 0 条**（T12 定的那句判据，见事实第 4 条） |
+
+  三条新判据点名复跑（各 1 passed）：`the_save_write_side_round_trips_through_the_default_store`、
+  `a_glyph_source_makes_fill_text_land_while_stroke_text_stays_named`、
+  `glyph_coverage_reads_the_same_placed_rect_as_glyph`。
+
+- 还开着的（本轮**没有**签字的）：① **CI 从没在 GitHub 跑过** —— `origin` 现在存在
+  （`git remote get-url origin` = `git@github.com:/iicrom/sisf`），补账前 `git rev-list --count origin/main..main` = **6**（本节的两次提交后是 8），
+  那 6 个提交（含整个 M10）连"每条命令在本机绿"之外的证据都没有；T12 那句"仓库无 remote"已作废，
+  本轮只改文档没 push。② **android 真机清单一条未执行**（无设备无 NDK）。③ **引擎侧两处退役只记账**
+  （`sisf-event::js` 的 façade 与 `sisf-rpgmk::translate`，定案是留给"不跑 JS 的工程"，动它是这六道闸门的事）。
+  ④ **`golden_sprite.rs` 的文件头与实现不符**本轮只在文档与 CI 口径里写清，**没有**用加
+  `#![cfg(windows)]` 的办法收口（理由见事实第 2 条）。
+
+### M 系列补账期间发现并修正的事实（2026-10-08，全部实测）
+
+1. **`cargo xtask check-all` 盖不到 `sisf-rpgmkmv`**：四组组合全是 `-p sisf`，而门面不依赖那颗 crate
+   （`grep rpgmkmv crates/sisf/Cargo.toml` = 0 命中）。所以"check-all 绿"对兼容层的一句都不算证据；
+   它的覆盖只来自 `cargo xtask clippy` 的两条 `--workspace` 腿、`cargo test --workspace --all-features`，
+   以及 `cargo xtask wasm-test` 里那条 `--features js,web` 腿。与 T11 事实 3、T12 事实 12 是同一个形状：
+   **"某组合没被编译"不报错**，得自己把口径铺满。
+2. **两条 golden 的口径不一致，本轮选择在文档与 CI 里写清而不是补 `#![cfg(windows)]`**：
+   `sisf-text/tests/golden_text.rs` 有那条属性，`sisf-sprite/tests/golden_sprite.rs` 只有文件头那句
+   "所以整个文件 `#![cfg(windows)]`"而**没有属性**（T11 续 事实 4 留作后续的那一条，本轮仍在）。补上属性
+   会让 `cargo xtask golden` 在非 Windows 上变成"两条各 0 用例、exit 0"的**假绿** —— `GOLDENS` 那个循环
+   不数用例数，只取第一个非零退出码，而 `xtask wasm-test` 里那道 `exit 7` 的防空绿在 golden 这一腿没有对应物。
+   所以本轮：文档写清两条的差异与后果，`.github/workflows/ci.yml` 的 ubuntu 腿补 `--skip golden`
+   （否则它会红在那行 `.expect("离屏渲染器需要可用 adapter…")` 上 —— **那是本机推断，本机上不了**：mac 有
+   adapter，所以这条 skip 的判据只能算"命令本身跑绿"（653 passed / exit 0），GitHub 那一半照旧未验）。
+3. **`js_sys::eval` 在 `--target web` 的 glue 里是严格上下文**，而上游那批构造体按**隐式全局**
+   （`X = function () {}`）写 ⇒ 报 `ReferenceError: Sisf2DGradient is not defined`，兼容层装不上。
+   node（CommonJS）与 QuickJS 都是 sloppy，所以**六道闸门全绿也能让它红**。落法是
+   `jsrt.rs::indirect_eval`（间接 eval 恒在全局 sloppy 语境求值），不是去改那批上游文本。
+   浏览器那一侧的证据在移植侧的 M11 段（本仓库给不出：闸门里没浏览器）。
+4. **rustdoc 警告会自己长回来，因为它不在闸门里**：T12 清到 0，本轮开局数到 9
+   （`sisf-media` 1 / `sisf-event` 4 / `sisf-rpgmk` 4），全是那三类老形状：`redundant explicit link target`×4
+   （`[`X`](a::b::X)`）、`unresolved link`×2（`[`VarStore`]` 没在作用域里、`[`Sound`]` 在隔壁 crate）、
+   `links to private item`×3（`Engine`/`Parser::discard`/`count_tree`）。修法照 T12 事实 13：私有项改裸反引号，
+   隔壁 crate 的项把路径写全（`[`sisf_event::Sound`]`、`[`crate::audio::Decoder`]），重复链接去掉目标或用
+   尾部定义块（`js/mod.rs` 的 `[`Param::Text`]: crate::command::Param::Text`）。
+5. **新 crate 落地时没人回头改说明书，所以账面落后得比代码快**：本轮扫出来的过期句 —— README 写
+   "10 个 crate / 9 个示例 / 约 3.6 万行 / 五个带 `test = true`"（实为 11 / 10 / 6.0 万行 Rust + 2.1 万行 JS /
+   七个），README 状态段还写着"T11 未实装 —— `crates/sisf-rpgmk` 只有一行模块文档，`video` 仍是空 feature"
+   （它是 3,756 行 / 6 个模块，`video` 在门面里是 `dep:sisf-media + sisf-media/video + image`）；
+   `docs/porting.md` §9.2 写着"MV/MZ 的加密素材待建"，而 `sisf-rpgmkmv/src/decrypt.rs` 早已交出那一格
+   （**只认 MV 的 16 字节头**，MZ 的头在这份判据里从没出现过 ⇒ 本轮把 MZ 从"待建"那句里拆出来，没当成已支持）；
+   `AGENTS.md` 与 `docs/platforms.md` 还写着"七条腿 / 195 个用例"与"`wasm-bindgen-test` 只出现在六个 crate"
+   （实为十条腿 / 473 / 九个 crate）。`sisf-rpgmkmv` 在 `docs/`、`README.md`、`AGENTS.md` 里的命中数本轮之前是 **0**。
+
 ## 全局 Definition of Done
 1. 每条子任务的验收必须留下可执行证据（命令 + 输出，或手测步骤 + 观察结果）。
 2. 每阶段结束时这三种组合均无 warning：`--all-features`（win）、`--no-default-features --features web`（wasm32）、`--no-default-features --features native`（android）。
@@ -722,3 +813,15 @@ T12 追加（按 DoD-3 登记）：`[workspace.dependencies]` 新增 **`wasm-bin
 T11 追加（按 DoD-3 登记；顺序排在 T12 之后，因为 T12 先做完了，本阶段是最后一块）：`[workspace.dependencies]` 新增 **`zip = "8.6.0"`**（清单字面点名的版本。crates.io 实查：8.6.0 发布于 2026-04-25，同族只有 9.0.0-pre1/2/3 更新 ⇒ 不碰预发布）。**`default-features = false, features = ["deflate"]`**：它的默认集是 `aes-crypto/bzip2/deflate64/deflate/lzma/ppmd/time/zstd/xz` 九条，会把四个解压器加一整套加密栈拖进依赖图，而 MV/MZ 工程归档（含 Steam 版）实际只有 deflate；`deflate` 自身展开为 `deflate-zopfli + deflate-flate2-zlib-rs`（纯 Rust，无需 C 工具链），非可选的 normal 依赖只有 `crc32fast/indexmap/memchr/typed-path`。声明位置是 `crates/sisf-rpgmk` 的 **`cfg(not(target_arch = "wasm32"))`** 段 + 该 crate 的 `archive = ["dep:zip"]` feature：**wasm 侧的 MV 工程走 `web/assets/manifest.txt` 散文件，没有归档可读**，所以门面 `sisf` 不转发 `archive`、**门面的 feature 面未变**。新增 crate 间依赖边：`sisf-rpgmk → { sisf-event, sisf-asset }`（翻译表产出 [`Command`](crates/sisf-event/src/command.rs)、`MapDef::load` 从 `Vfs` 读 `data/Map*.json`），两条都不打开对侧任何 feature。新增素材：**没有**——`data/*.json` 的 fixture 以字符串内嵌在单测里（官方 corescript 的 `template/` 只有 `js/` 与 `audio/`，**没有 `data/` 目录**，所以拿不到现成的真地图，见「T11 期间发现并修正的事实」）。xtask 新增一步：`WASM_TESTS` 加 `sisf-rpgmk` 那一腿（map/vars/translate 三组都是纯逻辑）。
 
 T11 续 追加（按 DoD-3 登记）：`[workspace.dependencies]` 新增 **`rquickjs = "0.11.0"`**，`default-features = false, features = ["std"]`（closure/`Function` API 够用，不拉 `macro` proc-macro、`either`、`indexmap`；默认集只有 `std`）。选 0.11.0 而非 max 0.14.0 的理由：0.11.0 的 `rust_version` 是 1.85（当时 `workspace.package.rust-version` 也是 1.85），0.12+ 要 1.87。⚠️ **这是本仓库第一个 `cc` 编 C 的依赖**（`rquickjs-core → rquickjs-sys`，`cc` 编 quickjs-ng），但它整个关在**可选、非默认**的 `js` feature 后，且只声明在 `crates/sisf-event` 的 `cfg(not(target_arch="wasm32"))` target 段 ⇒ **默认构建仍一行 C 都不编**（macOS Apple clang 21 实测 `cargo check -p sisf-event --features js` 编得过）。wasm32 腿不用 rquickjs：`js` feature 在 wasm 上展开成 `dep:js-sys`+`dep:wasm-bindgen`（都早在 T1 钉过），走浏览器自带引擎，DoD-4 的"平台没有的那条腿靠 feature/target 分开而不是空实现"。新增 feature 边：`sisf-event/js`（跨两个 target 段的 optional dep 共用一条 feature）与门面 `sisf/js = ["sisf-event/js"]`；`js` **不进 default/native/web**。xtask 两处：`WEB_PORTING_FEATURES` 追加 `js`（wasm 构建配方带上这条腿）、`WASM_TESTS` 加 sisf-event 的 js 腿（`--features js -- js::`）。新增素材：钟声事件的 `data/Map001.json` 里一条真 `355`（examples 与 web 两份同步、`gen.py` 重跑逐字节相同）。**没有新增第三方之外的 crate，也没有把 rquickjs 提进默认依赖面。**
+
+M 系列追加（按 DoD-3 登记，在 T11 续之后）：**没有新增第三方 crate** —— `crates/sisf-rpgmkmv` 用的
+`serde`/`serde_json`/`thiserror`/`rquickjs`/`js-sys`/`wasm-bindgen`/`png`/`wasm-bindgen-test` 全是已钉的那几条，
+版本一律 `{ workspace = true }`。新增的是**一颗 crate 与四条边**：`sisf-rpgmkmv → { sisf-asset, sisf-rpgmk,
+sisf-media(optional), }`，feature 面 `js = ["dep:rquickjs","dep:js-sys","dep:wasm-bindgen","dep:sisf-media",
+"sisf-media/image"]` 与 `web = ["sisf-asset/web"]`，`default = []`；`raster.rs` 的夹具要自己造一张真 PNG
+⇒ `png` 作为 **dev-dependency**（不进运行时面）。**门面 `sisf` 的 feature 面未变**（移植侧直接依赖
+`sisf-rpgmkmv`，所以不转发、不 re-export）。xtask 两处：`WASM_TESTS` 加 `sisf-rpgmkmv --features js,web`
+那一腿，`GOLDENS`/`WEB_PORTING_FEATURES` 未动。新增素材：**没有**（上游 `rpg_*.js` 的文本以逐字切片
+的形式住在 `src/js/`，与 `js/plugins/` 里的游戏插件无关 —— 那些不在本仓库）。另有两处不属于依赖的记账：
+`.github/workflows/ci.yml` 的 ubuntu 腿加 `--skip golden`（事实第 2 条），以及本轮为文档复核实跑的
+`cargo test -p sisf-rpgmkmv --all-features`（243/1 ignored）与三条新判据的点名复跑。

@@ -4,8 +4,8 @@
 //!
 //! MV/MZ 的事件页里，`355`（脚本）与 `356`（插件命令）里塞的是**原始 JavaScript**：
 //! `$gameVariables.setValue(1, $gameVariables.value(3) + 1);`。兼容层
-//! （[`crate`](crate) 的兄弟模块 `sisf-rpgmk::translate`）已经把 `355` 的多行源码原样拼成一个
-//! [`Param::Text`](crate::command::Param::Text) 交进 `Command::Custom("rpgmv.script", …)`，但
+//! （隔壁那颗 crate 的 `sisf-rpgmk::translate`）已经把 `355` 的多行源码原样拼成一个 [`Param::Text`] 交进
+//! `Command::Custom("rpgmv.script", …)`，但
 //! 默认后端不认这个名字 ⇒ 每次都登记一条"后端不认名字"的告警后跳过。本模块就是来认领这两条
 //! 主题的：把 JS 跑出来，把它想做的**事**翻译成引擎自己的 [`Command`]，交回一段
 //! [`Program`] 让**虚拟机**去执行。
@@ -27,13 +27,15 @@
 //! ## 双端两颗引擎、一份账本
 //!
 //! native = rquickjs（quickjs-ng），wasm = 浏览器自带引擎。为了让"同一份脚本 → 同一份行为"这件事
-//! **可证**，本模块只依赖一条引擎无关的接缝 [`Engine`]（`exec` 跑语句 + `eval_json` 求一个 JSON 串），
+//! **可证**，本模块只依赖一条引擎无关的接缝 `Engine`（住在 `engine.rs`，私有：`exec` 跑语句 + `eval_json` 求一个 JSON 串），
 //! 而 prelude（JS 侧的 `$game*` 门面）、`__sisfOut` 账本协议、把账本解析成 `Vec<Command>` 的代码
 //! **全部引擎无关**。两颗引擎唯一的差别就是 `exec`/`eval_json` 怎么调，prelude 与 parser 是同一份。
 //! 于是"双端一致"不是"看着一样"，而是同一个断言在两条腿上各跑一遍（见 `tests` 与 xtask 的 js 腿）。
 //!
 //! [`Command`]: crate::command::Command
 //! [`Program`]: crate::command::Program
+//! [`Param::Text`]: crate::command::Param::Text
+//! [`VarStore`]: crate::vars::VarStore
 
 mod engine;
 

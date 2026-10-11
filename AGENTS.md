@@ -16,14 +16,20 @@ T1→T2→T3→T4→{T5,T7}；T5→T6；{T5,T7}→T8；T2→T9；{T6,T8,T9}→T1
 写回 `todo.md` 该阶段的验收条目，并在其下追加"### T<n> 期间发现并修正的事实"。那些事实段是
 本仓库最有价值的部分：它们记录的几乎全是"设计文档写的和上游 API 实际行为不一致"的地方。
 
+**例外：M 系列（`crates/sisf-rpgmkmv` 的 MV 兼容层）。** 它的路线、拆解（M10.0–M10.7）与逐格验收账
+**不住在本仓库**，在移植侧的 `../sisf_pray/M10.md`（闸门命令与期望读数在 `../sisf_pray/docs/m10-gates.md`，
+尺子是 `../sisf_pray/tools/probes/`）。本仓库代码注释里那 115 处 `M10.md` 引用的就是那一份，在这里
+解不到它。进那一族之前先读那两份；引擎侧自己的补账（为什么多了一个 crate、当前闸门读数、还欠什么）
+写在 `todo.md` 末尾的"M 系列补账"，**不要**拿它当逐格账。
+
 ## 闸门
 
 ```sh
 cargo xtask fmt --check
-cargo xtask clippy            # 宿主 + wasm32 两条 -D warnings
+cargo xtask clippy            # 宿主两腿 + wasm32 两腿，都是 -D warnings
 cargo xtask check-all         # 四组 feature 组合，见 xtask/src/main.rs
-cargo test --workspace --all-features
-cargo xtask wasm-test         # 七条腿，纯逻辑套件
+cargo test --workspace --all-features   # 非 Windows 要加 `-- --skip golden`，理由见下
+cargo xtask wasm-test         # 十条腿（sisf-app 与 sisf-event 各占两条），纯逻辑套件
 cargo xtask golden            # 离屏像素基线；--bless 重写
 ```
 
@@ -33,8 +39,11 @@ cargo xtask golden            # 离屏像素基线；--bless 重写
   顶替 —— 那是降级证据。
 - **写证据要记真实数字**（测试条数、fps、误差上限）和命令原文，让下一轮能照抄复现。
 - **0 个用例通过不是绿**。`cargo xtask wasm-test` 已经在合计为 0 时返回 exit 7，别绕过它。
-- 某一腿"环境决定"的红（ubuntu 无 GPU adapter、node 退出断言）要在命令旁边写清它红了意味着什么，
-  不许因为"反正是环境问题"就把退出码当噪音吞掉。
+- 某一腿"环境决定"的红要在命令旁边写清它红了意味着什么，不许因为"反正是环境问题"就把退出码当噪音吞掉。
+  现成的三例：**macOS 上 `cargo xtask golden` 必红**（基线出自 Windows/RTX，mac 的取整差到单通道 2 > TOL 1；
+  **不许 `--bless`**，那会把 Windows 基线覆盖成 mac 输出、反过来弄坏 CI）；**ubuntu 没有 GPU adapter**
+  （所以 CI 的 ubuntu test 腿 `--skip gpu_tests --skip readback_clear --skip golden`）；**node 退出断言**
+  （见下面「会咬人的地方」）。
 
 `cargo doc --no-deps --workspace --all-features` 输出里没有 `warning:` 是 T12 定的判据，
 但它**没有**接进 CI/xtask；攒了 rustdoc 警告就顺手清掉，别等闸门。
@@ -67,7 +76,11 @@ cargo xtask golden            # 离屏像素基线；--bless 重写
 - **不引入清单外的依赖**（DoD-3）；确需新增时先在 `todo.md` 的"附：钉版增补"登记理由，再改 `Cargo.toml`。
 - 两条上游坑已经写死在注释里，别"顺手清理"：`lofty` 必须保留默认 feature
   `id3v2_compression_support`（0.25.4 关掉它会编译失败），`midly` 用 `default-features=false, ["std"]`。
-- `wasm-bindgen-test` 只出现在六个 crate 的 wasm32 `dev-dependencies` 段 —— 移到公共段会让发布产物变大。
+- `rquickjs`（本仓库唯一那条 `cc` 编 C 的腿）有**两个落点**：`sisf-event/js` 与 `sisf-rpgmkmv/js`，两者都
+  是 optional、都只在自己的 target 段（native = `rquickjs`，wasm32 = `js-sys`+`wasm-bindgen`），且都**不进
+  default/native/web** ⇒ 默认构建仍然零 C。开 `js` 之前先数依赖面（见 `todo.md` 的 T11 续 / M 系列追加）。
+- `wasm-bindgen-test` 只出现在**九个 crate** 的 wasm32 `dev-dependencies` 段（asset/audio/render/sprite/app/event/media/rpgmk/rpgmkmv）
+  —— 移到公共段会让发布产物变大。`cargo xtask wasm-test` 的腿数因此是**十条**（`sisf-app` 与 `sisf-event` 各占两条）。
 
 ## 会咬人的地方
 
@@ -84,6 +97,20 @@ cargo xtask golden            # 离屏像素基线；--bless 重写
   `golden|check-all|clippy` 都在链接阶段报 `failed to remove ... Access is denied. (os error 5)`。
   用 `tasklist //FI "IMAGENAME eq xtask.exe"` 查到 PID 再 `taskkill //PID <pid> //F` —— **杀之前先问**，
   那个静态服务很可能是用户开着的 wasm 复验页面。
+
+- **`check-all` 不编 `sisf-rpgmkmv`**。门面 `sisf` 不依赖它（移植侧直接依赖那颗 crate），而四组组合
+  全是 `-p sisf` ⇒ 改完兼容层把 `check-all` 绿当成"它被编过了"是错的。它的覆盖来自
+  `cargo xtask clippy` 的两条 `--workspace` 腿、`cargo test --workspace --all-features`，以及
+  `cargo xtask wasm-test` 里那条 `--features js,web` 的 `sisf-rpgmkmv` 腿（本轮 wasm32 上 240 条）。
+- **`--target web` 的 glue 是 ES module（默认 strict），而 `js_sys::eval` 就在那个上下文里求值** ⇒
+  上游写法那批**隐式全局**（`X = function () {}`，没有 `var`/`globalThis.`）报 `ReferenceError`。
+  node（CommonJS）与 QuickJS 都是 sloppy ⇒ **只有浏览器这一条腿会红，而闸门全绿照不出来**。
+  落法是 `crates/sisf-rpgmkmv/src/jsrt.rs` 的 `indirect_eval`（拿 `globalThis` 上那颗 `eval` 做**间接**调用），
+  不是去改那批上游文本。症状与复验读数为移植侧 `M10.md` 的 M11 那一格（兼容层装不上、屏幕全黑）。
+- **兼容层交出去的上游文本不许"顺手改良"**。`crates/sisf-rpgmkmv/src/js/` 里那些 `.js` 是 `rpg_*.js`
+  的逐字切片，改动要么照上游一字不改、要么在原地写下为什么；自创的底（`shim_*.js`）走另一档名单，
+  **两边都由移植侧的尺子双向数**（`../sisf_pray/tools/probes/objects-verbatim.py`）—— 在本仓库里
+  拿肉眼看好那一格不算证据。
 
 ## 复验 wasm
 

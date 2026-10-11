@@ -22,7 +22,7 @@
 //! - wasm：`<video>` + canvas，或 WebCodecs。两条都要 JS 胶水，`Send` 约束在 wasm 上
 //!   退化为"只在主线程碰"（与 [`audio`](crate::audio) 侧 pump 同样的处境）。
 //! - 带音轨的影片：视频帧走 [`VideoSource::next_frame`]，音频走 [`VideoSource::take_audio`]
-//!   （一个 [`Decoder`](crate::audio::Decoder)），**由游戏侧按时间轴对齐二者**。引擎不做
+//!   （一个 [`crate::audio::Decoder`]），**由游戏侧按时间轴对齐二者**。引擎不做
 //!   同步：把时钟塞进桩里等于桩一旦被替换就要改签名，而"谁跟谁对齐"本来就是游戏决定
 //!   （过场可以静音）。
 //!

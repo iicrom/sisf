@@ -23,7 +23,7 @@
 //!    + 原始参数，并计数；同一码只 warn 一次（[`TranslateReport::warn_new`]）。
 //! 3. 降级出去的指令**不带走它的缩进体**：MV 在这种码上是"整块跳过"（`skipBranch`），
 //!    把 `then` 提到外层无条件执行会直接改变剧情走向，比丢内容严重得多。所以
-//!    [`Parser::discard`] 会丢掉更深的行并计数。
+//!    `Parser::discard`（私有的那一格跳分支）会丢掉更深的行并计数。
 //!
 //! ## 单位换算
 //!
@@ -130,7 +130,7 @@ pub fn mv_speed_px_per_tick(move_speed: i64, opts: Options) -> f32 {
 /// 一次翻译的账（清单要"unimplemented 计数打印"，所以这份账就是返回值的一部分）。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TranslateReport {
-    /// 产出的指令条数（**整棵树**，含分支体内 —— 与 [`count_tree`] 同一个口径，
+    /// 产出的指令条数（**整棵树**，含分支体内 —— 与 `count_tree`（私有计数函数）同一个口径，
     /// 单事件与单页两种入口对同一份数据要给出同一个数）。
     pub commands: usize,
     /// MV 码 → 降级次数。

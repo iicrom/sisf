@@ -52,14 +52,17 @@ jobs:
         include:
           # GPU 相关套件按平台分叉：`gpu_tests`（atlas/bitmap/renderer 的读回）与
           # `readback_clear` 在没有 adapter 的环境里是 `.expect(...)` 硬失败，不是跳过。
-          # ubuntu-latest 没有可用 GPU ⇒ 那一腿跳过这两组，由 windows 腿与 golden job 覆盖；
+          # `golden` 也是同一格：`sisf-sprite/tests/golden_sprite.rs` **没有**挂 `#![cfg(windows)]`
+          # （它的文件头那句声称与实现不符，账在 todo.md「T11 续 事实 4」），所以在 ubuntu 上它照样
+          # 编译、走到 `.expect("离屏渲染器需要可用 adapter（DX12/Vulkan）")` 而硬失败。
+          # ubuntu-latest 没有可用 GPU ⇒ 那一腿跳过这三组，由 windows 腿与 golden job 覆盖；
           # 反过来 windows 全跑。
           - os: windows-latest
             gpu_tests: 全跑
             test_args: ""
           - os: ubuntu-latest
             gpu_tests: 跳过，无 adapter
-            test_args: "-- --skip gpu_tests --skip readback_clear"
+            test_args: "-- --skip gpu_tests --skip readback_clear --skip golden"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -134,8 +137,10 @@ jobs:
   # ---------------------------------------------------------------- golden
   golden:
     name: golden (windows)
-    # golden 只在 Windows 跑：测试文件整个 `#![cfg(windows)]`（wgpu 没有软件光栅后端，
-    # 离屏同样要真 adapter）。在别的 OS 上它会编译成 0 个用例并"通过"，那种绿没有意义。
+    # golden 只在 Windows 跑（wgpu 没有软件光栅后端，离屏同样要真 adapter）。两条基线里
+    # `sisf-text/golden_text` 挂了 `#![cfg(windows)]` ⇒ 在别的 OS 上编译成 0 个用例并"通过"（那种绿
+    # 没有意义，所以它只在 windows 腿有意义），而 `sisf-sprite/golden_sprite` **没挂** ⇒ 在 mac/Linux
+    # 上它会真跑并红在跨后端取整或无 adapter（见上一条 matrix 注释与 todo.md）。
     # ⚠️ runner 上的 adapter 通常是 D3D12 WARP；若某天 `request_adapter` 取不到，
     # 这条 job 会红在 `.expect("离屏渲染器需要可用 adapter（DX12/Vulkan）")`，
     # 那不是回归，是环境 —— 判据看那行 expect，别去改阈值。

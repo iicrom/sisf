@@ -305,7 +305,7 @@ impl EventPage {
 /// MV 的音频引用对象：`{name, volume, pitch, pan}`（`AudioManager.makeEmptyAudio` 给的就是
 /// 这四个字段，`volume`/`pitch`/`pan` 缺省都是 0）。
 ///
-/// **折成 [`Sound`] 时只带走 `name` 与 `volume`**：引擎的混音器没有"按这条声音变调/pan"的
+/// **折成 [`sisf_event::Sound`] 时只带走 `name` 与 `volume`**：引擎的混音器没有"按这条声音变调/pan"的
 /// 通路（`Sound` 只有 `gain`/`fade_in`），所以 `pitch`/`pan` 原样存下来只为诊断。
 /// 折算式与上游一致 —— `AudioManager.updateBufferParameters` 里
 /// `buffer.volume = configVolume * (audio.volume || 0) / 10000`，其中 `configVolume`

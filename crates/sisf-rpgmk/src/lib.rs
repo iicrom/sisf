@@ -2,7 +2,7 @@
 //!
 //! 这一层**不是**引擎的核心，也不该被核心依赖：它把 MV 工程的那套磁盘约定
 //! （`data/Map*.json` + `data/System.json` + `data/Tilesets.json`、`Game_*` 三张表、
-//! 事件指令码表）翻译成引擎已有的形状（[`MapDef`](map::MapDef) → 图块查询、
+//! 事件指令码表）翻译成引擎已有的形状（[`MapDef`] → 图块查询、
 //! [`Command`](sisf_event::Command) 序列、[`VarStore`](sisf_event::VarStore)）。
 //! 翻译不了的码降级成 `Command::Custom("rpgmv.unimplemented", …)` 并计数，绝不 panic
 //! —— 一个没实现的指令不该让整张地图进不去。
